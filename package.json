@@ -1,0 +1,11 @@
+{
+  "name": "hxmc-objc-extern-gen",
+  "private": true,
+  "scripts": {
+    "build": "haxe build.hxml",
+    "gen": "haxe build.hxml && ./bin/objc-extern-gen out --check"
+  },
+  "devDependencies": {
+    "@hxmc/cli": "0.1.0-nightly.20261028.23a0a79"
+  }
+}
