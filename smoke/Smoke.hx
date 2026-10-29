@@ -1,8 +1,9 @@
 import foundation.*;
 import appkit.*;
-import corefoundation.*;
+import coregraphics.*;
 import objc.NSObject;
 import hxmc.I64;
+import hxmc.objc.Selector;
 import hxmc.unsafe.Arena;
 import hxmc.unsafe.CString;
 import hxmc.unsafe.Ptr;
@@ -15,20 +16,28 @@ class Smoke {
 		return Arena.scopedValue(a -> NSString.alloc().initWithUTF8String(a.cstring(s)));
 
 	static function str(s:NSString):String
-		return (cast s.UTF8String : CString).toString();
+		return s.UTF8String.toString();
 
 	static function main() {
 		// NSString
 		var s = ns("héllo");
 		trace("string", str(s), s.length, str(s.uppercaseString));
 		// an enum passed to a message (and its result an enum)
-		var r = s.compareOptions(ns("HÉLLO"), NSStringCompareOptions.CaseInsensitiveSearch);
+		var r = s.compare(ns("HÉLLO"), CaseInsensitiveSearch);
 		trace("compare", r == NSComparisonResult.OrderedSame, (r : I64));
+		// overloads: one name, the selectors of their parameters' names
+		trace("compare'", (s.compare(ns("HÉLLO")) : I64), s.rangeOfString(ns("l")).location, s.rangeOfString(ns("L"), CaseInsensitiveSearch).location);
+		trace("font", NSFont.systemFontOfSize(12).pointSize, NSFont.systemFontOfSize(13, 0.4).pointSize);
+		trace("perform", str(cast s.performSelector(Selector.of("uppercaseString"))), str(cast s.performSelector(Selector.of("stringByAppendingString:"), ns("!"))));
+		// a C string both ways
+		var c:CString = s.UTF8String;
+		trace("cstring", c.length(), str(NSString.stringWithUTF8String(c)));
 		// NSMutableArray
 		var a = NSMutableArray.alloc().init();
 		a.addObject(ns("one"));
 		a.addObject(ns("two"));
 		trace("array", a.count, str(cast a.objectAtIndex(1)), str(a.description));
+		trace("indexOf", a.indexOfObject(ns("two")), str(a.componentsJoinedByString(ns("+"))));
 		// NSDictionary
 		var d = NSDictionary.dictionaryWithObject(ns("v"), ns("k"));
 		trace("dict", d.count, str(cast d.objectForKey(ns("k"))));
@@ -46,8 +55,8 @@ class Smoke {
 		trace("hidden", v.hidden, v.flipped);
 		// an options enum through a property
 		var w = NSWindow.alloc().initWithContentRect(new CGRect(new CGPoint(0, 0), new CGSize(100, 100)),
-			NSWindowStyleMask.Titled | NSWindowStyleMask.Closable, NSBackingStoreType.Buffered, false);
-		trace("window", (w.styleMask : I64), w.styleMask == (NSWindowStyleMask.Titled | NSWindowStyleMask.Closable));
+			Titled | Closable | Resizable, Buffered, false);
+		trace("window", (w.styleMask : I64), w.styleMask == (NSWindowStyleMask.Titled | NSWindowStyleMask.Closable | NSWindowStyleMask.Resizable));
 		w.styleMask = NSWindowStyleMask.Borderless;
 		trace("window'", (w.styleMask : I64));
 		var u = NSMutableString.alloc().initWithString(ns("ab"));

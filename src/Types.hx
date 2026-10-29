@@ -27,6 +27,7 @@ class Types {
 	public static var I64 = HPrim(["hxmc"], "I64");
 	public static var PTR = HPrim(["hxmc", "unsafe"], "Ptr");
 	public static var INT = HPrim([], "Int");
+	public static var CSTRING = HPrim(["hxmc", "unsafe"], "CString");
 
 	static var QUALIFIERS = [
 		"_Nonnull", "_Nullable", "_Nullable_result", "_Null_unspecified", "__kindof", "const", "volatile", "__strong", "__weak", "__unsafe_unretained",
@@ -120,6 +121,8 @@ class Types {
 		}
 		var name = base.join(" ");
 		if (stars >= 2) return PTR;
+		// a C string (`char *` is a buffer: Ptr)
+		if (stars == 1 && tag == "" && name == "char" && ws.indexOf("const") >= 0 && ws.indexOf("const") < ws.indexOf("*")) return CSTRING;
 		// clang desugars only a sugared outermost type (`NSPoint *` stays): typedefs
 		var td = tag == "" && ["id", "Class", "SEL", "Protocol", "instancetype"].indexOf(name) < 0 ? r.typedefs.get(name) : null;
 		if (td != null && !gen.isClass(name)) {

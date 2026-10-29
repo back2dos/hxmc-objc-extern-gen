@@ -16,7 +16,8 @@ typedef FieldRec = {
 	lib:Null<Origin>, // a category's of another library
 	deprecated:Null<String>,
 	instancetype:Bool,
-	accessor:Bool
+	accessor:Bool,
+	isOverload:Bool // one of several methods of its name
 }
 
 // what a class sees of itself and its superclasses
@@ -65,6 +66,13 @@ class Gen {
 	];
 
 	static var POS:Position = {file: "", min: 0, max: 0};
+
+	// memory is the compiler's (docs/interop.md, "Memory")
+	static var MEMORY = ["retain", "release", "autorelease"];
+
+	// instancetype methods NSObject declares that its subclasses do not
+	// redeclare (alloc and the initializers they do)
+	static var ROOT_ONLY = ["self", "new", "allocWithZone:"];
 
 	var r:Reader;
 	var types:Types;
@@ -137,11 +145,19 @@ class Gen {
 				skip("category unavailable on macOS");
 				continue;
 			}
+			var why = cat.cls == "NSObject" ? informal(cat.cat) : null;
+			if (why != null) {
+				where = "NSObject(" + cat.cat.name + ") " + cat.cat.origin.framework + ":";
+				skip("informal protocol (category of NSObject): " + why, [for (m in cat.cat.members) (m.isStatic ? "+" : "-") + m.name].join(" "));
+				tally(skipped, "informal protocol methods", cat.cat.members.length);
+				continue;
+			}
 			for (m in cat.cat.members)
 				c.members.push(m);
 			for (p in cat.cat.protocols)
 				adopted.get(cat.cls).push({proto: p, origin: cat.cat.origin});
 		}
+		where = "";
 		// anonymous enums and records named by their typedefs
 		for (td in r.typedefs) {
 			if (td.tagId == null) continue;
@@ -155,6 +171,40 @@ class Gen {
 		}
 		for (e in r.enums)
 			if (e.name != null && !enumByName.exists(e.name)) enumByName.set(e.name, e);
+	}
+
+	// why a category of NSObject is an informal protocol (methods for other
+	// objects to implement: delegates, data sources, validation, actions,
+	// which NSObject does not), or null: one outside NSObject's own headers
+	// that a formal protocol of its name (without "Deprecated") supersedes,
+	// or whose members are all callbacks
+	function informal(cat:Container):Null<String> {
+		if (cat.origin.header == "NSObject") return null;
+		if (r.protocols.exists(cat.name) || r.protocols.exists(cat.name.replace("Deprecated", ""))) return "a formal protocol of its name";
+		if (cat.members.length == 0) return null;
+		for (m in cat.members)
+			if (!callback(m)) return null;
+		return "callbacks";
+	}
+
+	// an instance method whose first parameter is its sender: named `sender`,
+	// a notification (`controlTextDidChange:`), or an object of a class the
+	// first piece names without its prefix (`fileManager:`, `validateMenuItem:`)
+	static function callback(m:Member):Bool {
+		if (m.isStatic) return false;
+		return switch m.kind {
+			case KMethod(_, params, _) if (params.length > 0):
+				var p = params[0];
+				var obj = ~/^\s*(?:const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\*/;
+				if (p.name == "sender") return true;
+				if (!obj.match(p.type.qual)) return false;
+				var cls = obj.matched(1);
+				if (cls == "NSNotification") return true;
+				var short = (~/^[A-Z][A-Z]./.match(cls) ? cls.substr(2) : cls).toLowerCase();
+				var first = pieces(m.name)[0].toLowerCase();
+				short.length > 2 && (first.startsWith(short) || first.endsWith(short));
+			case _: false;
+		}
 	}
 
 	public function isClass(name:String):Bool
@@ -364,6 +414,16 @@ class Gen {
 		return p;
 	}
 
+	// a parameter's type as Haxe tells overloads apart (Null<C> is C)
+	static function sigKey(t:HType):String
+		return switch t {
+			case HPrim(pack, name): pack.concat([name]).join(".");
+			case HVoid: "Void";
+			case HClass(name, _): name;
+			case HStruct(rec): rec.name;
+			case HEnum(e): e.name;
+		}
+
 	static function camel(ps:Array<String>):String {
 		var b = new StringBuf();
 		for (i in 0...ps.length)
@@ -372,8 +432,9 @@ class Gen {
 	}
 
 	// the name and parameter names of a method: the selector's first piece,
-	// the following pieces; else @:selector and names that are valid
-	function naming(sel:String, params:Array<Param>, taken:String->Bool):{name:String, params:Array<String>, selMeta:Bool} {
+	// the following pieces; else @:selector and names that are valid (an
+	// overload keeps the first piece)
+	function naming(sel:String, params:Array<Param>, taken:String->Bool, isOverload = false):{name:String, params:Array<String>, selMeta:Bool} {
 		var ps = pieces(sel);
 		var derived = ps.length == (params.length == 0 ? 1 : params.length) && Lambda.foreach(ps, valid);
 		var names = [];
@@ -386,12 +447,14 @@ class Gen {
 				first += "_";
 			names = [first].concat(later);
 		}
-		if (derived && !taken(ps[0])) return {name: ps[0], params: names, selMeta: false};
+		if (derived && (isOverload || !taken(ps[0]))) return {name: ps[0], params: names, selMeta: false};
 		// renamed: the pieces joined, or with underscores until free
 		var name = ident(ps.length > 1 && ps.join("") != "" ? camel([for (p in ps) if (p != "") p]) : ps[0]);
 		if (derived && taken(ps[0]) && params.length <= 1 && ps.length == 1) name = ident(ps[0]);
-		while (taken(name))
-			name += "_";
+		if (isOverload) name = ps[0];
+		else
+			while (taken(name))
+				name += "_";
 		var pnames = [];
 		for (i in 0...params.length) {
 			var n = ident(i < ps.length && i > 0 && ps[i] != "" ? ps[i] : params[i].name);
@@ -415,8 +478,8 @@ class Gen {
 			case HClass(name, nullable):
 				var c = path([packOf(classes.get(name).origin)], name);
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
-			case HStruct(rec): path([packOf(rec.origin)], typeName(rec.name));
-			case HEnum(e): path([packOf(e.origin)], typeName(e.name));
+			case HStruct(rec): path([typePack(rec.name, rec.origin)], typeName(rec.name));
+			case HEnum(e): path([typePack(e.name, e.origin)], typeName(e.name));
 		}
 	}
 
@@ -430,6 +493,11 @@ class Gen {
 	public static function packOf(o:Origin):String
 		return o.framework == "" ? "clib" : o.framework.toLowerCase();
 
+	// a struct's or enum's package: Core Graphics' types where CoreFoundation
+	// declares them (CGRect, CGPoint, CGSize in CFCGTypes.h) in `coregraphics`
+	public static function typePack(name:String, o:Origin):String
+		return name.startsWith("CG") && (o.framework == "CoreFoundation" || o.framework == "CoreGraphics") ? "coregraphics" : packOf(o);
+
 	static function meta(name:String, ?args:Array<Expr>):MetadataEntry
 		return {name: name, params: args == null ? [] : args, pos: POS};
 
@@ -442,8 +510,9 @@ class Gen {
 	static function libMeta(o:Origin):MetadataEntry
 		return o.lib != null ? meta(":hxmc.lib", [str(o.lib)]) : meta(":hxmc.framework", [str(o.framework)]);
 
+	// bare: the headers' messages are Apple's text
 	static function deprecatedMeta(d:String):MetadataEntry
-		return d == "" ? meta(":deprecated") : meta(":deprecated", [str(d)]);
+		return meta(":deprecated");
 
 	function methodField(f:FieldRec, ret:HType, isOverride:Bool, mod:Module):Field {
 		var m = [];
@@ -453,6 +522,7 @@ class Gen {
 		var access = [];
 		if (f.isStatic) access.push(AStatic);
 		if (isOverride) access.push(AOverride);
+		if (f.isOverload) access.push(AOverload);
 		return {
 			name: f.name,
 			access: access,
@@ -491,7 +561,16 @@ class Gen {
 				skip("unavailable on macOS");
 				if (m.isStatic) st.factories.remove(m.name) else st.initLike.remove(m.name);
 			}
-		var live = [for (m in members) if (!unavailable(m.avail)) m];
+		var live = [];
+		for (m in members) {
+			if (unavailable(m.avail)) continue;
+			if (!m.isStatic && m.kind.match(KMethod(_, _, _)) && MEMORY.indexOf(m.name) >= 0) {
+				where = name + " -" + m.name;
+				skip("memory management (the compiler's)");
+				continue;
+			}
+			live.push(m);
+		}
 
 		// properties first: their accessors' selectors cover the methods of the same selectors
 		var seenProps = new Map<String, Bool>();
@@ -532,7 +611,7 @@ class Gen {
 								// (Haxe allows no redefinition of the variable)
 								var f:FieldRec = {
 									name: "set_" + m.name, sel: setSel, isStatic: false, params: [{name: "v", t: h}], ret: HVoid, selMeta: true,
-									lib: lib, deprecated: depr, instancetype: false, accessor: true
+									lib: lib, deprecated: depr, instancetype: false, accessor: true, isOverload: false
 								};
 								fields.push(methodField(f, HVoid, false, mod));
 								st.names.set(f.name, f);
@@ -554,11 +633,11 @@ class Gen {
 					var renamed = pname != m.name;
 					var getF:FieldRec = {
 						name: "get_" + pname, sel: getSel, isStatic: m.isStatic, params: [], ret: h, selMeta: renamed || getter != null && getter != m.name,
-						lib: lib, deprecated: null, instancetype: false, accessor: true
+						lib: lib, deprecated: null, instancetype: false, accessor: true, isOverload: false
 					};
 					var setF:FieldRec = {
 						name: "set_" + pname, sel: setSel, isStatic: m.isStatic, params: [{name: "v", t: h}], ret: h,
-						selMeta: renamed || setter != null, lib: lib, deprecated: null, instancetype: false, accessor: true
+						selMeta: renamed || setter != null, lib: lib, deprecated: null, instancetype: false, accessor: true, isOverload: false
 					};
 					var vm = [];
 					if (depr != null) vm.push(deprecatedMeta(depr));
@@ -585,20 +664,43 @@ class Gen {
 			}
 		}
 
-		// methods: of those whose names would be the same, the one of the fewest
-		// pieces keeps it (`performSelector:` over `performSelector:withObject:`)
-		var preferred = new Map<String, String>();
+		// methods whose first pieces are the same: overloads of it where their
+		// parameters' types tell them apart (`systemFontOfSize:`,
+		// `systemFontOfSize:weight:`), the fewest pieces first; the others are
+		// renamed to their pieces joined
+		var groups = new Map<String, Array<{sel:String, sig:String}>>(); // "+name": the methods named so
+		var candidates = [];
+		var seenCandidates = new Map<String, Bool>();
 		for (m in live)
 			switch m.kind {
-				case KMethod(_, _, false):
-					var k = (m.isStatic ? "+" : "-") + pieces(m.name)[0];
-					var p = preferred.get(k);
-					if (p == null || pieces(m.name).length < pieces(p).length) preferred.set(k, m.name);
+				case KMethod(_, _, false) if (!seenCandidates.exists(key(m))):
+					seenCandidates.set(key(m), true);
+					candidates.push(m);
 				case _:
 			}
+		haxe.ds.ArraySort.sort(candidates, (a, b) -> pieces(a.name).length - pieces(b.name).length);
+		for (m in candidates) {
+			var ps = pieces(m.name);
+			// inherited: its inherited name
+			if (m.isStatic ? st.factories.exists(m.name) : st.sels.exists(m.name)) continue;
+			if (!valid(ps[0]) || (m.isStatic ? st.staticNames : st.names).exists(ps[0])) continue;
+			if (!m.isStatic && ps.length >= 2 && descendantClaims(name, ps[0], m.name)) continue;
+			var sig = try attempt(() -> switch m.kind {
+				case KMethod(_, params, _): [for (p in params) sigKey(types.map(p.type, self))].join(",");
+				case _: throw "unreachable";
+			}) catch (_:Skip) continue;
+			var gk = (m.isStatic ? "+" : "-") + ps[0];
+			if (!groups.exists(gk)) groups.set(gk, []);
+			var g = groups.get(gk);
+			if (!Lambda.exists(g, x -> x.sig == sig)) g.push({sel: m.name, sig: sig});
+		}
 		function claimed(isStatic:Bool, s:String, sel:String):Bool {
-			var p = preferred.get((isStatic ? "+" : "-") + s);
-			return p != null && p != sel;
+			var g = groups.get((isStatic ? "+" : "-") + s);
+			return g != null && !Lambda.exists(g, x -> x.sel == sel);
+		}
+		function overloaded(isStatic:Bool, sel:String):Bool {
+			var g = groups.get((isStatic ? "+" : "-") + pieces(sel)[0]);
+			return g != null && g.length > 1 && Lambda.exists(g, x -> x.sel == sel);
 		}
 		var seenMethods = new Map<String, Bool>();
 		for (m in live) {
@@ -635,17 +737,18 @@ class Gen {
 							f.deprecated = depr;
 							redeclaredStatic.set(sel, true);
 						} else {
-							var n = naming(sel, params, s -> st.staticNames.exists(s) || claimed(true, s, sel));
+							var o = overloaded(true, sel);
+							var n = naming(sel, params, s -> st.staticNames.exists(s) || claimed(true, s, sel), o);
 							f = {
 								name: n.name, sel: sel, isStatic: true, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
-								ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false
+								ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o
 							};
 						}
 						commit();
 						fields.push(methodField(f, f.ret, false, mod));
 						st.staticNames.set(f.name, f);
 						st.staticSels.set(sel, f);
-						if (isIt) st.factories.set(sel, f);
+						if (isIt && ROOT_ONLY.indexOf(sel) < 0) st.factories.set(sel, f);
 						tally(count, "class methods");
 					} else {
 						var inh = st.sels.get(sel);
@@ -666,7 +769,7 @@ class Gen {
 								tally(count, "methods");
 								continue;
 							}
-							if (isIt && !redeclared.exists(sel) && inh.instancetype) {
+							if (isIt && !redeclared.exists(sel) && inh.instancetype && ROOT_ONLY.indexOf(sel) < 0) {
 								// unavailable above, available again here
 								var f = Reflect.copy(inh);
 								f.ret = retype(sig.ret);
@@ -682,16 +785,17 @@ class Gen {
 							continue;
 						}
 						var multi = pieces(sel).length >= 2;
-						var n = naming(sel, params, s -> st.names.exists(s) || claimed(false, s, sel) || multi && descendantClaims(name, s, sel));
+						var o = overloaded(false, sel);
+						var n = naming(sel, params, s -> st.names.exists(s) || claimed(false, s, sel) || multi && descendantClaims(name, s, sel), o);
 						var f:FieldRec = {
 							name: n.name, sel: sel, isStatic: false, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
-							ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false
+							ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o
 						};
 						commit();
 						fields.push(methodField(f, f.ret, false, mod));
 						st.names.set(f.name, f);
 						st.sels.set(sel, f);
-						if (isIt) {
+						if (isIt && ROOT_ONLY.indexOf(sel) < 0) {
 							st.initLike.set(sel, f);
 							redeclared.set(sel, true);
 						}
@@ -747,9 +851,8 @@ class Gen {
 	}
 
 	// the instance names the classes below each class want: a property's, a
-	// method's first piece (an ancestor's method of several pieces yields
-	// its name: AppKit's NSObject category `layer:shouldInheritContentsScale:fromWindow:`
-	// to NSView's property `layer`)
+	// method's first piece, of its fewest pieces (an ancestor's method of
+	// several pieces yields its name to a property or a method of one piece)
 	var below:Null<Map<String, Map<String, String>>>;
 
 	function descendantClaims(cls:String, name:String, sel:String):Bool {
@@ -761,7 +864,9 @@ class Gen {
 					if (m.isStatic || unavailable(m.avail)) continue;
 					switch m.kind {
 						case KProperty(_, _, _, _): own.set(m.name, "@" + m.name);
-						case KMethod(_, _, _): if (!own.exists(pieces(m.name)[0])) own.set(pieces(m.name)[0], m.name);
+						case KMethod(_, _, _):
+							var p = pieces(m.name)[0], o = own.get(p);
+							if (o == null || !o.startsWith("@") && pieces(o).length > pieces(m.name).length) own.set(p, m.name);
 					}
 				}
 				var s = classes.get(c).superName;
@@ -769,15 +874,17 @@ class Gen {
 					if (!below.exists(s)) below.set(s, new Map());
 					var b = below.get(s);
 					for (k => v in own)
-						if (!b.exists(k) || v.startsWith("@")) b.set(k, v);
+						if (!b.exists(k) || v.startsWith("@") || !b.get(k).startsWith("@") && pieces(b.get(k)).length > pieces(v).length) b.set(k, v);
 					s = classes.get(s).superName;
 				}
 			}
 		}
 		var b = below.get(cls);
 		if (b == null) return false;
+		// a property's or a selector's of one piece (a descendant's method of
+		// several pieces is renamed anyway)
 		var v = b.get(name);
-		return v != null && v != sel;
+		return v != null && v != sel && (v.startsWith("@") || pieces(v).length == 1);
 	}
 
 	// the classes in an order where superclasses come first
@@ -891,7 +998,7 @@ class Gen {
 		var m = e.avail != null && e.avail.deprecated != null ? [deprecatedMeta(e.avail.deprecated)] : [];
 		tally(count, e.options ? "enums (options)" : "enums");
 		return {
-			pack: [packOf(e.origin)],
+			pack: [typePack(e.name, e.origin)],
 			name: typeName(e.name),
 			pos: POS,
 			meta: m,
@@ -987,7 +1094,7 @@ class Gen {
 		});
 		tally(count, "structs");
 		return {
-			pack: [packOf(rec.origin)],
+			pack: [typePack(rec.name, rec.origin)],
 			name: typeName(rec.name),
 			pos: POS,
 			meta: [meta(":hxmc.struct")],
@@ -1037,7 +1144,7 @@ class Gen {
 				skip("enum named like a class");
 				continue;
 			}
-			var mod = new Module(packOf(enumsUsed.get(n).origin));
+			var mod = new Module(typePack(n, enumsUsed.get(n).origin));
 			emit(enumDef(enumsUsed.get(n), mod), mod);
 			names.set(n, true);
 		}
@@ -1048,7 +1155,7 @@ class Gen {
 				skip("struct named like another type");
 				continue;
 			}
-			var mod = new Module(packOf(structsUsed.get(n).origin));
+			var mod = new Module(typePack(n, structsUsed.get(n).origin));
 			emit(structDef(structsUsed.get(n), mod), mod);
 			names.set(n, true);
 		}
