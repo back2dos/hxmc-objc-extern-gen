@@ -1284,6 +1284,13 @@ class Gen {
 		var small = !wide && under != Types.INT;
 		var names = shortNames(e);
 		var fields:Array<Field> = [];
+		function id(n:String):Expr
+			return {expr: EConst(CIdent(n)), pos: POS};
+		function make(v:Expr):Expr
+			return {expr: ENew({pack: [], name: typeName(e.name)}, [v]), pos: POS};
+		// the underlying value of an argument (its `to`)
+		function under(n:String):Expr
+			return {expr: ECheckType(id(n), uct), pos: POS};
 		for (c in e.consts) {
 			if (unavailable(c.avail)) {
 				skip("enum constant unavailable on macOS");
@@ -1298,27 +1305,49 @@ class Gen {
 					access: [APublic, AStatic, AFinal],
 					meta: m,
 					pos: POS,
-					kind: FVar(self, {expr: ECast(int(hex(c.value), "i64"), null), pos: POS})
+					kind: FVar(self, make(int(hex(c.value), "i64")))
 				});
 				tally(count, "enum constants (64-bit, static final)");
 			} else
 				fields.push({name: n, access: [], meta: m, pos: POS, kind: FVar(null, small ? {expr: ECast(intLiteral(c.value.low), null), pos: POS} : intLiteral(c.value.low))});
 			tally(count, "enum constants");
 		}
+		if (wide || e.options)
+			fields.push({
+				name: "new",
+				access: [AInline],
+				pos: POS,
+				kind: FFun({args: [{name: "v", type: uct}], ret: null, expr: {expr: EBinop(OpAssign, id("this"), id("v")), pos: POS}})
+			});
 		if (e.options) {
+			// no options: none of the bits (unless a constant has the name)
+			if (!Lambda.exists(fields, f -> f.name == "None"))
+				fields.push({
+					name: "None",
+					access: [APublic, AStatic, AInline],
+					pos: POS,
+					kind: FVar(null, make(intLiteral(0)))
+				});
 			function op(o:Binop, fname:String):Field {
-				var b:Expr = {expr: ECheckType({expr: ECast({expr: EConst(CIdent("b")), pos: POS}, null), pos: POS}, uct), pos: POS};
-				var body:Expr = {expr: ECast({expr: EParenthesis({expr: EBinop(o, {expr: EConst(CIdent("this")), pos: POS}, b), pos: POS}), pos: POS}, null), pos: POS};
+				var body = make({expr: EBinop(o, id("this"), under("b")), pos: POS});
 				return {
 					name: fname,
 					access: [AInline],
-					meta: [{name: ":op", params: [{expr: EBinop(o, {expr: EConst(CIdent("A")), pos: POS}, {expr: EConst(CIdent("B")), pos: POS}), pos: POS}], pos: POS}],
+					meta: [{name: ":op", params: [{expr: EBinop(o, id("A"), id("B")), pos: POS}], pos: POS}],
 					pos: POS,
 					kind: FFun({args: [{name: "b", type: self}], ret: self, expr: {expr: EReturn(body), pos: POS}})
 				};
 			}
 			fields.push(op(OpOr, "or"));
 			fields.push(op(OpAnd, "and"));
+			// all of the given bits set
+			var test:Expr = {expr: EBinop(OpEq, {expr: EParenthesis({expr: EBinop(OpAnd, id("this"), under("o")), pos: POS}), pos: POS}, under("o")), pos: POS};
+			fields.push({
+				name: "has",
+				access: [APublic, AInline],
+				pos: POS,
+				kind: FFun({args: [{name: "o", type: self}], ret: TPath({pack: [], name: "Bool"}), expr: {expr: EReturn(test), pos: POS}})
+			});
 		}
 		var m = e.avail != null && e.avail.deprecated != null ? [deprecatedMeta(e.avail.deprecated)] : [];
 		tally(count, e.options ? "enums (options)" : "enums");

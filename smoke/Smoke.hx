@@ -89,9 +89,13 @@ class Smoke {
 		trace("sorted", str(sorted.componentsJoinedByString(ns(","))));
 		var done:Null<() -> Void> = null;
 		var urls = NSArray.arrayWithObject(NSURL.fileURLWithPath(ns("/tmp"), true));
-		NSFileCoordinator.alloc().initWithFilePresenter(null).prepareForReadingItemsAtURLsOptionsWritingItemsAtURLsOptionsErrorByAccessor(urls, cast 0, null, cast 0,
+		NSFileCoordinator.alloc().initWithFilePresenter(null).prepareForReadingItemsAtURLsOptionsWritingItemsAtURLsOptionsErrorByAccessor(urls, NSFileCoordinatorReadingOptions.None, null, NSFileCoordinatorWritingOptions.None,
 			Ptr.nil(), completion -> done = completion);
 		trace("accessor", done != null);
+		// options: none, combined, tested
+		var o = NSFileCoordinatorReadingOptions.WithoutChanges | NSFileCoordinatorReadingOptions.ResolvesSymbolicLink;
+		trace("options", o.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(NSFileCoordinatorReadingOptions.ForUploading),
+			NSFileCoordinatorReadingOptions.None.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(NSFileCoordinatorReadingOptions.None));
 		done();
 	}
 }
