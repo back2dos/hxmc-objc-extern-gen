@@ -8,6 +8,7 @@ enum HType {
 	HVoid;
 	HClass(name:String, nullable:Bool);
 	HProto(name:String, nullable:Bool); // id<P>: the protocol's interface
+	HFun(args:Array<HType>, ret:HType, nullable:Bool); // a block: a Haxe function
 	HStruct(r:RecordInfo);
 	HEnum(e:EnumInfo);
 }
@@ -90,6 +91,60 @@ class Types {
 			case _: null;
 		}
 
+	// a block's spelling, `R (^ _Nullable)(A, B)`: a function (A, B) -> R,
+	// nullable as the caret's annotation says
+	function block(d:String, q:String, self:String, depth:Int):HType {
+		d = stripAngles(d);
+		var i = d.indexOf("(^");
+		var close = matching(d, i);
+		if (close < 0) throw new Skip("block type", d);
+		var inner = d.substring(i + 2, close);
+		var rest = d.substr(close + 1).trim();
+		if (!rest.startsWith("(")) throw new Skip("block type", d);
+		var pend = matching(rest, 0);
+		if (pend < 0 || rest.substr(pend + 1).trim() != "") throw new Skip("block type", d);
+		var ret = d.substr(0, i).trim();
+		var params = splitTop(rest.substring(1, pend));
+		if (params.length == 1 && params[0] == "void") params = [];
+		if (params.indexOf("...") >= 0) throw new Skip("variadic block");
+		var args = [for (p in params) map({qual: p, desugared: p}, self, false, depth + 1)];
+		for (a in args)
+			if (a == HVoid) throw new Skip("block type", d);
+		var r = map({qual: ret, desugared: ret}, self, false, depth + 1);
+		return HFun(args, r, nullable(inner) || nullable(q));
+	}
+
+	// the index of the parenthesis closing the one at s[open], or -1
+	static function matching(s:String, open:Int):Int {
+		var depth = 0;
+		for (k in open...s.length)
+			switch s.charAt(k) {
+				case "(": depth++;
+				case ")":
+					depth--;
+					if (depth == 0) return k;
+				case _:
+			}
+		return -1;
+	}
+
+	// a parameter list split at its top-level commas
+	static function splitTop(s:String):Array<String> {
+		var r = [], depth = 0, start = 0;
+		for (k in 0...s.length)
+			switch s.charAt(k) {
+				case "(" | "<" | "[": depth++;
+				case ")" | ">" | "]": depth--;
+				case "," if (depth == 0):
+					r.push(s.substring(start, k).trim());
+					start = k + 1;
+				case _:
+			}
+		var last = s.substr(start).trim();
+		if (last != "" || r.length > 0) r.push(last);
+		return r;
+	}
+
 	// `self`: the class whose declaration this is (instancetype)
 	public function map(t:CType, self:String, inStruct = false, depth = 0):HType {
 		if (depth > 16) throw new Skip("typedef cycle", t.qual + " = " + t.desugared);
@@ -98,7 +153,10 @@ class Types {
 		if (t.qual.indexOf("*") < 0 && firstName(t.qual) == "SEL") return HPrim(["hxmc", "objc"], "Selector");
 		var d = t.desugared;
 		if (d.indexOf("__attribute__") >= 0) throw new Skip("vector type");
-		if (d.indexOf("(^") >= 0) return PTR; // a block: for now
+		if (stripAngles(d).indexOf("(^") >= 0) {
+			if (inStruct) return PTR;
+			return block(d, t.qual, self, depth);
+		}
 		var anonymous = d.indexOf("(unnamed") >= 0 || d.indexOf("(anonymous") >= 0;
 		if (anonymous) {
 			if (d.trim().endsWith("*")) return PTR;

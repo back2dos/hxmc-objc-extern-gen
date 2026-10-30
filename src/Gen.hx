@@ -479,6 +479,7 @@ class Gen {
 			case HVoid: "Void";
 			case HClass(name, _): name;
 			case HProto(name, _): "P:" + name;
+			case HFun(args, ret, _): "(" + [for (a in args) sigKey(a)].join(",") + ")->" + sigKey(ret);
 			case HStruct(rec): rec.name;
 			case HEnum(e): e.name;
 		}
@@ -540,6 +541,9 @@ class Gen {
 			case HProto(name, nullable):
 				var c = path([packOf(protos.get(name).origin)], protoName(name));
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+			case HFun(args, ret, nullable):
+				var f = TFunction([for (a in args) ctype(a, mod)], ctype(ret, mod));
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(f)]}) : f;
 			case HStruct(rec): path([typePack(rec.name, rec.origin)], typeName(rec.name));
 			case HEnum(e): path([typePack(e.name, e.origin)], typeName(e.name));
 		}

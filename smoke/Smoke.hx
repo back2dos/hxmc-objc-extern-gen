@@ -83,5 +83,15 @@ class Smoke {
 		trace("delegate", parser.parse(), x.log, (x : NSObject).respondsToSelector(Selector.of("parserDidEndDocument:")));
 		var copying:NSCopying = s;
 		trace("conforms", Std.isOfType(copying, NSCopying), Std.isOfType((x : NSObject), NSCopying), Std.isOfType((x : NSObject), NSXMLParserDelegate));
+		// blocks: a comparator returning an enum, a block given a block (a
+		// completion handler, kept and called after the accessor returns)
+		var sorted = a.sortedArrayUsingComparator((p, q) -> (cast q : NSString).compare(cast p));
+		trace("sorted", str(sorted.componentsJoinedByString(ns(","))));
+		var done:Null<() -> Void> = null;
+		var urls = NSArray.arrayWithObject(NSURL.fileURLWithPath(ns("/tmp"), true));
+		NSFileCoordinator.alloc().initWithFilePresenter(null).prepareForReadingItemsAtURLsOptionsWritingItemsAtURLsOptionsErrorByAccessor(urls, cast 0, null, cast 0,
+			Ptr.nil(), completion -> done = completion);
+		trace("accessor", done != null);
+		done();
 	}
 }
