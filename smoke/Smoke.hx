@@ -18,7 +18,7 @@ class XmlLog extends NSObject implements NSXMLParserDelegate {
 	public function new() {}
 
 	public function parserDidStartElementNamespaceURIQualifiedNameAttributes(parser:NSXMLParser, didStartElement:NSString, namespaceURI:Null<NSString>,
-			qualifiedName:Null<NSString>, attributes:NSDictionary)
+			qualifiedName:Null<NSString>, attributes:NSDictionary<NSString, NSString>)
 		log.push("<" + didStartElement.UTF8String.toString() + ">");
 
 	public function parserFoundCharacters(parser:NSXMLParser, foundCharacters:NSString)
@@ -50,11 +50,11 @@ class Smoke {
 		var a = NSMutableArray.alloc().init();
 		a.addObject(ns("one"));
 		a.addObject(ns("two"));
-		trace("array", a.count, str(cast a.objectAtIndex(1)), str(a.description));
+		trace("array", a.count, str(a.objectAtIndex(1)), str(a.description));
 		trace("indexOf", a.indexOfObject(ns("two")), str(a.componentsJoinedByString(ns("+"))));
 		// NSDictionary
 		var d = NSDictionary.dictionaryWithObject(ns("v"), ns("k"));
-		trace("dict", d.count, str(cast d.objectForKey(ns("k"))));
+		trace("dict", d.count, str(d.objectForKey(ns("k"))));
 		// NSNumber
 		var n = NSNumber.numberWithInteger(42);
 		trace("number", n.integerValue, n.doubleValue, str(n.stringValue));
@@ -94,6 +94,17 @@ class Smoke {
 		trace("accessor", done != null);
 		// options: none, combined, tested
 		var o = NSFileCoordinatorReadingOptions.WithoutChanges | NSFileCoordinatorReadingOptions.ResolvesSymbolicLink;
+		// lightweight generics: typed elements, a block over them, covariance,
+		// a superclass's argument (an anchor constrained to anchors of its axis)
+		var host = NSView.alloc().initWithFrame(new CGRect(new CGPoint(0, 0), new CGSize(10, 10)));
+		host.addSubview(NSButton.alloc().initWithFrame(new CGRect(new CGPoint(0, 0), new CGSize(5, 5))));
+		var subs:NSArray<NSView> = host.subviews;
+		var kinds = [];
+		subs.enumerateObjectsUsingBlock((view, i, stop) -> kinds.push(str(view.className)));
+		var objects:NSArray = NSArray.upcast(subs);
+		trace("generics", kinds, objects.count, Std.isOfType(subs.objectAtIndex(0), NSButton));
+		var c = host.leadingAnchor.constraintEqualToAnchor(subs.objectAtIndex(0).leadingAnchor);
+		trace("anchor", c != null);
 		trace("options", o.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(NSFileCoordinatorReadingOptions.ForUploading),
 			NSFileCoordinatorReadingOptions.None.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(None));
 		done();

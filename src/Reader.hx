@@ -109,6 +109,7 @@ class Reader {
 	function members(n:Dynamic, c:Container, o:Origin, key:String) {
 		var inner:Array<Dynamic> = n.inner;
 		if (inner == null) return;
+		var scope = [for (p in typeParams(n)) p.name];
 		for (m in inner) {
 			locate(m);
 			switch (m.kind : String) {
@@ -127,6 +128,7 @@ class Reader {
 					var mem = new Member(m.name, !inst, KMethod(ctype(m.returnType), params, m.variadic == true), o);
 					mem.at = m.range != null ? location(m.range.begin) : -1;
 					mem.optional = m.control == "optional";
+					mem.scope = scope;
 					mem.designated = designated;
 					mem.avail = avail.get(key + "|" + (inst ? "-" : "+") + m.name);
 					c.members.push(mem);
@@ -139,6 +141,7 @@ class Reader {
 					var mem = new Member(m.name, Reflect.field(m, "class") == true,
 						KProperty(pt, m.readonly == true, getter, setter), o);
 					mem.optional = m.control == "optional";
+					mem.scope = scope;
 					mem.avail = avail.get(key + "|@" + m.name);
 					c.members.push(mem);
 					walkChildren(m);
@@ -146,6 +149,40 @@ class Reader {
 					walkChildren(m);
 			}
 		}
+	}
+
+	// a class's or category's type parameters
+	static function typeParams(n:Dynamic):Array<TypeParamInfo> {
+		var inner:Array<Dynamic> = n.inner;
+		if (inner == null) return [];
+		return [
+			for (p in inner)
+				if (p.kind == "ObjCTypeParamDecl") {
+					var q:String = p.type.qualType;
+					{name: p.name, bound: {qual: q, desugared: q}, covariant: p.variance == "covariant"};
+				}
+		];
+	}
+
+	// the superclass's type arguments as the declaration spells them
+	// (`: NSLayoutAnchor<NSLayoutXAxisAnchor *>`), read from its source
+	function superArgs(f:String, begin:Int, sup:String):Null<Array<String>> {
+		var src = source(f);
+		if (src == null || begin < 0) return null;
+		var end = src.indexOf("@end", begin);
+		var decl = src.substring(begin, end < 0 ? src.length : end);
+		var re = new EReg(":\\s*" + sup + "\\s*<", "");
+		if (!re.match(decl)) return null;
+		var open = re.matchedPos().pos + re.matchedPos().len - 1, depth = 0;
+		for (k in open...decl.length)
+			switch decl.charAt(k) {
+				case "<": depth++;
+				case ">":
+					depth--;
+					if (depth == 0) return Types.splitTop(decl.substring(open + 1, k));
+				case _:
+			}
+		return null;
 	}
 
 	function protocolList(n:Dynamic):Array<String> {
@@ -163,6 +200,13 @@ class Reader {
 				c.origin = o;
 			}
 			if (Reflect.field(n, "super") != null) c.superName = Reflect.field(n, "super").name;
+			var tps = typeParams(n);
+			if (tps.length > 0) c.typeParams = tps;
+			if (c.superName != null && n.inner != null) {
+				var begin = n.range != null ? location(n.range.begin) : -1;
+				var a = superArgs(file, begin, c.superName);
+				if (a != null) c.superArgs = a;
+			}
 			for (p in protocolList(n))
 				if (c.protocols.indexOf(p) < 0) c.protocols.push(p);
 		}
@@ -207,10 +251,15 @@ class Reader {
 	// method in the protocol's source (read here, never written out)
 	var sources = new Map<String, Null<String>>();
 
-	function optionals(f:String, begin:Int, ms:Array<Member>) {
-		if (begin < 0 || f == "") return;
+	function source(f:String):Null<String> {
+		if (f == "") return null;
 		if (!sources.exists(f)) sources.set(f, try sys.io.File.getContent(f) catch (_:Dynamic) null);
-		var src = sources.get(f);
+		return sources.get(f);
+	}
+
+	function optionals(f:String, begin:Int, ms:Array<Member>) {
+		if (begin < 0) return;
+		var src = source(f);
 		if (src == null) return;
 		for (m in ms) {
 			if (!m.kind.match(KMethod(_, _, _)) || m.at <= begin || m.at > src.length) continue;

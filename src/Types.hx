@@ -6,7 +6,9 @@ using StringTools;
 enum HType {
 	HPrim(pack:Array<String>, name:String); // Int, Float, Bool, hxmc.I64, hxmc.unsafe.Ptr, ...
 	HVoid;
-	HClass(name:String, nullable:Bool);
+	HClass(name:String, nullable:Bool, args:Array<HType>); // args: a lightweight generic's (none: its defaults)
+	HParam(name:String, nullable:Bool); // a type parameter of the class (or of a static method, the class's)
+	HId(nullable:Bool); // hxmc.objc.Id, any object: a type argument's or bound's `id`
 	HProto(name:String, nullable:Bool); // id<P>: the protocol's interface
 	HFun(args:Array<HType>, ret:HType, nullable:Bool); // a block: a Haxe function
 	HStruct(r:RecordInfo);
@@ -38,6 +40,12 @@ class Types {
 
 	var r:Reader;
 	var gen:Gen;
+
+	// the type parameters in scope: as the member's declaration names them
+	// (a category's own names) => the class's
+	public var scope = new Map<String, String>();
+	// the class's own type arguments: its parameters (instancetype)
+	public var selfArgs:Array<HType> = [];
 
 	public function new(r, gen) {
 		this.r = r;
@@ -94,7 +102,6 @@ class Types {
 	// a block's spelling, `R (^ _Nullable)(A, B)`: a function (A, B) -> R,
 	// nullable as the caret's annotation says
 	function block(d:String, q:String, self:String, depth:Int):HType {
-		d = stripAngles(d);
 		var i = d.indexOf("(^");
 		var close = matching(d, i);
 		if (close < 0) throw new Skip("block type", d);
@@ -129,7 +136,7 @@ class Types {
 	}
 
 	// a parameter list split at its top-level commas
-	static function splitTop(s:String):Array<String> {
+	public static function splitTop(s:String):Array<String> {
 		var r = [], depth = 0, start = 0;
 		for (k in 0...s.length)
 			switch s.charAt(k) {
@@ -145,17 +152,69 @@ class Types {
 		return r;
 	}
 
+	// the content of the first <...> after `name` in s, or null
+	static function angles(s:String, name:String):Null<String> {
+		var at = new EReg("\\b" + name + "\\s*<", "");
+		if (!at.match(s)) return null;
+		var open = at.matchedPos().pos + at.matchedPos().len - 1, depth = 0;
+		for (k in open...s.length)
+			switch s.charAt(k) {
+				case "<": depth++;
+				case ">":
+					depth--;
+					if (depth == 0) return s.substring(open + 1, k);
+				case _:
+			}
+		return null;
+	}
+
+	// a lightweight generic's type arguments (`NSArray<NSString *> *`), as
+	// spelled or desugared; none (its defaults) where they are not objects or
+	// not as many as its parameters (`NSView<NSTextInputClient>`: protocols)
+	function typeArgs(name:String, t:CType, self:String, depth:Int):Array<HType> {
+		var n = gen.typeParamCount(name);
+		if (n == 0) return [];
+		var a = angles(t.qual, name);
+		if (a == null) a = angles(t.desugared, name);
+		if (a == null) return [];
+		var spelled = splitTop(a);
+		if (spelled.length != n) return [];
+		var r = [];
+		for (s in spelled) {
+			var h = try typeArg({qual: s, desugared: s}, self, depth + 1) catch (_:Skip) null;
+			if (h == null) return [];
+			r.push(h);
+		}
+		return r;
+	}
+
+	// a type argument (or a bound): an object type, never null; `id` any object
+	public function typeArg(t:CType, self:String, depth = 0):Null<HType> {
+		if (firstName(t.qual) == "id" && t.qual.indexOf("<") < 0) return HId(false);
+		return switch map(t, self, false, depth) {
+			case HClass(n, _, a): HClass(n, false, a);
+			case HProto(n, _): HProto(n, false);
+			case HParam(n, _): HParam(n, false);
+			case HId(_): HId(false);
+			case _: null;
+		}
+	}
+
 	// `self`: the class whose declaration this is (instancetype)
 	public function map(t:CType, self:String, inStruct = false, depth = 0):HType {
 		if (depth > 16) throw new Skip("typedef cycle", t.qual + " = " + t.desugared);
-		if (isInstancetype(t)) return HClass(self, nullable(t.qual));
+		if (isInstancetype(t)) return HClass(self, nullable(t.qual), selfArgs);
+		// a type parameter (`ObjectType`, `__kindof KeyType`): an id
+		var first = firstName(t.qual);
+		if (scope.exists(first) && t.qual.indexOf("*") < 0 && t.qual.indexOf("(^") < 0) return HParam(scope.get(first), nullable(t.qual));
 		// SEL desugars to a pointer to a struct
 		if (t.qual.indexOf("*") < 0 && firstName(t.qual) == "SEL") return HPrim(["hxmc", "objc"], "Selector");
 		var d = t.desugared;
 		if (d.indexOf("__attribute__") >= 0) throw new Skip("vector type");
 		if (stripAngles(d).indexOf("(^") >= 0) {
 			if (inStruct) return PTR;
-			return block(d, t.qual, self, depth);
+			// (as spelled, where it is: its type parameters and arguments)
+			return block(stripAngles(t.qual).indexOf("(^") >= 0 ? t.qual : d, t.qual, self, depth);
 		}
 		var anonymous = d.indexOf("(unnamed") >= 0 || d.indexOf("(anonymous") >= 0;
 		if (anonymous) {
@@ -203,7 +262,7 @@ class Types {
 				if (!r.classes.exists(name)) return PTR; // a pointer to a type parameter (`ObjectType const *`)
 				throw new Skip("class not defined or unavailable", d);
 			}
-			return gen.useClass(name, nullable(t.qual));
+			return gen.useClass(name, nullable(t.qual), typeArgs(name, t, self, depth));
 		}
 		switch tag {
 			case "struct":

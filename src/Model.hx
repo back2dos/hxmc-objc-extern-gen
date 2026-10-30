@@ -41,6 +41,9 @@ typedef Availability = {unavailable:Bool, deprecated:Null<String>};
 
 typedef Param = {name:String, type:CType};
 
+// a lightweight generic's parameter (`ObjectType`, bound by `id`)
+typedef TypeParamInfo = {name:String, bound:CType, covariant:Bool};
+
 enum MemberKind {
 	KMethod(ret:CType, params:Array<Param>, variadic:Bool);
 	KProperty(type:CType, readonly:Bool, getter:Null<String>, setter:Null<String>);
@@ -55,6 +58,7 @@ class Member {
 	public var origin:Origin; // of the container declaring it (a category's)
 	public var designated:Bool = false;
 	public var at:Int = -1; // the offset of its declaration in its file (a protocol's: @optional)
+	public var scope:Array<String> = []; // the type parameters' names where it is declared (a category's own)
 
 	public function new(name, isStatic, kind, origin) {
 		this.name = name;
@@ -73,6 +77,8 @@ class Container {
 	public var origin:Null<Origin>; // of its definition
 	public var span:Int = -1; // the definition's extent (forward declarations are short)
 	public var avail:Null<Availability>;
+	public var typeParams:Array<TypeParamInfo> = []; // a class's
+	public var superArgs:Null<Array<String>>; // the superclass's type arguments, as spelled
 
 	public function new(name)
 		this.name = name;

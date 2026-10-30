@@ -228,10 +228,65 @@ class Gen {
 	public function enumNamed(name:String):Null<EnumInfo>
 		return enumByName.get(name);
 
-	public function useClass(name:String, nullable:Bool):HType {
+	public function useClass(name:String, nullable:Bool, ?args:Array<HType>):HType {
 		refs.push(name);
-		return HClass(name, nullable);
+		return HClass(name, nullable, args == null ? [] : args);
 	}
+
+	// a class's lightweight generic parameters: how many
+	public function typeParamCount(name:String):Int {
+		var c = r.classes.get(name);
+		return c == null ? 0 : c.typeParams.length;
+	}
+
+	// the type parameters in scope for a member of class cls (none: a
+	// protocol's), named as its declaration names them (Types.scope)
+	function within(m:Member, cls:Null<String>) {
+		types.scope = new Map();
+		types.selfArgs = [];
+		var c = cls == null ? null : r.classes.get(cls);
+		if (c == null) return;
+		for (i in 0...c.typeParams.length) {
+			var own = c.typeParams[i].name;
+			types.scope.set(own, own);
+			if (i < m.scope.length) types.scope.set(m.scope[i], own);
+			types.selfArgs.push(HParam(own, false));
+		}
+	}
+
+	// t with the type parameters replaced (an inherited member's, in a subclass's terms)
+	static function subst(t:HType, by:Map<String, HType>):HType
+		return switch t {
+			case HParam(n, nl) if (by.exists(n)):
+				switch by.get(n) {
+					case HClass(c, _, a): HClass(c, nl, a);
+					case HProto(p, _): HProto(p, nl);
+					case HParam(q, _): HParam(q, nl);
+					case HId(_): HId(nl);
+					case o: o;
+				}
+			case HClass(n, nl, a): HClass(n, nl, [for (x in a) subst(x, by)]);
+			case HFun(args, ret, nl): HFun([for (x in args) subst(x, by)], subst(ret, by), nl);
+			case _: t;
+		}
+
+	static function substRec(f:FieldRec, by:Map<String, HType>):FieldRec {
+		var g = Reflect.copy(f);
+		g.params = [for (p in f.params) {name: p.name, t: subst(p.t, by)}];
+		g.ret = subst(f.ret, by);
+		return g;
+	}
+
+	// the type parameters t names
+	static function paramsIn(t:HType, into:Array<String>)
+		switch t {
+			case HParam(n, _): if (into.indexOf(n) < 0) into.push(n);
+			case HClass(_, _, a): for (x in a) paramsIn(x, into);
+			case HFun(args, ret, _):
+				for (x in args) paramsIn(x, into);
+				paramsIn(ret, into);
+			case _:
+		}
 
 	// id<P> (the first protocol of the list generated, NSObject's last)
 	public function useProtocol(names:Array<String>, nullable:Bool):Null<HType> {
@@ -410,6 +465,7 @@ class Gen {
 				progress = true;
 				for (m in protos.get(name).members) {
 					if (unavailable(m.avail) || m.isStatic) continue;
+					within(m, null);
 					try {
 						attempt(() -> switch m.kind {
 							case KMethod(ret, params, variadic):
@@ -432,6 +488,7 @@ class Gen {
 					includeProto(a.proto);
 				for (m in membersOf(name)) {
 					if (unavailable(m.avail) || m.optional) continue;
+					within(m, name);
 					try {
 						attempt(() -> switch m.kind {
 							case KMethod(ret, params, variadic):
@@ -477,7 +534,9 @@ class Gen {
 		return switch t {
 			case HPrim(pack, name): pack.concat([name]).join(".");
 			case HVoid: "Void";
-			case HClass(name, _): name;
+			case HClass(name, _, _): name;
+			case HParam(name, _): "T:" + name;
+			case HId(_): "Id";
 			case HProto(name, _): "P:" + name;
 			case HFun(args, ret, _): "(" + [for (a in args) sigKey(a)].join(",") + ")->" + sigKey(ret);
 			case HStruct(rec): rec.name;
@@ -535,8 +594,14 @@ class Gen {
 		return switch t {
 			case HPrim(pack, name): path(pack, name);
 			case HVoid: TPath({pack: [], name: "Void"});
-			case HClass(name, nullable):
-				var c = path([packOf(classes.get(name).origin)], name);
+			case HClass(name, nullable, args):
+				var c = path([packOf(classes.get(name).origin)], name, args.length == 0 ? null : [for (a in args) TPType(ctype(a, mod))]);
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+			case HParam(name, nullable):
+				var c = TPath({pack: [], name: name});
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+			case HId(nullable):
+				var c = path(["hxmc", "objc"], "Id");
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
 			case HProto(name, nullable):
 				var c = path([packOf(protos.get(name).origin)], protoName(name));
@@ -586,7 +651,19 @@ class Gen {
 		if (f.lib != null) m.push(libMeta(f.lib));
 		if (f.deprecated != null) m.push(deprecatedMeta(f.deprecated));
 		var access = [];
-		if (f.isStatic) access.push(AStatic);
+		var tps:Array<TypeParamDecl> = [];
+		if (f.isStatic) {
+			access.push(AStatic);
+			// (a static method has none of the class's parameters: its own)
+			var used = [];
+			for (p in f.params)
+				paramsIn(p.t, used);
+			paramsIn(ret, used);
+			for (n in used) {
+				var b = bounds.get(n);
+				tps.push({name: n, constraints: [ctype(b != null ? b : HId(false), mod)]});
+			}
+		}
 		if (isOverride) access.push(AOverride);
 		if (f.isOverload) access.push(AOverload);
 		return {
@@ -594,9 +671,12 @@ class Gen {
 			access: access,
 			meta: m,
 			pos: POS,
-			kind: FFun({args: [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}], ret: ctype(ret, mod), expr: null})
+			kind: FFun({args: [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}], ret: ctype(ret, mod), expr: null, params: tps})
 		};
 	}
+
+	// the bounds of the type parameters of the class being written
+	var bounds = new Map<String, HType>();
 
 	// --- protocols ---
 
@@ -653,6 +733,7 @@ class Gen {
 				case KProperty(t, ro, getter, setter):
 					where = name + " (protocol) " + m.name;
 					if (info.sels.exists("@" + m.name)) continue;
+					within(m, null);
 					var h = try attempt(() -> types.map(t, "NSObject")) catch (s:Skip) {
 						skip(s.reason, s.what);
 						continue;
@@ -702,6 +783,7 @@ class Gen {
 						skip("variadic");
 						continue;
 					}
+					within(m, null);
 					var sig = try attempt(() -> {
 						ret: types.map(retT, "NSObject"),
 						params: [for (p in params) types.map(p.type, "NSObject")]
@@ -756,6 +838,8 @@ class Gen {
 				mod.use([packOf(protos.get(q).origin)], protoName(q));
 				parents.push({pack: [], name: protoName(q)});
 			}
+		// (a root protocol: any object, hxmc.objc.Id)
+		if (!Lambda.exists(p.protocols, q -> protos.exists(q))) parents.push({pack: ["hxmc", "objc"], name: "Id"});
 		var m = [meta(":hxmc.objc", [str(name)])];
 		if (p.avail != null && p.avail.deprecated != null) m.push(deprecatedMeta(p.avail.deprecated));
 		tally(count, "protocols");
@@ -865,12 +949,47 @@ class Gen {
 		var members = membersOf(name);
 		where = name;
 		var self = name;
+		var rc = r.classes.get(name);
+		var selfArgs = [for (p in rc.typeParams) HParam(p.name, false)];
 
 		function retype(t:HType):HType
 			return switch t {
-				case HClass(_, n): HClass(self, n);
+				case HClass(_, n, _): HClass(self, n, selfArgs);
 				case _: t;
 			}
+
+		// lightweight generics: the class's parameters and their bounds, the
+		// superclass's arguments, and the inherited members in their terms
+		within(new Member("", false, KMethod({qual: "void", desugared: "void"}, [], false), c.origin), name);
+		bounds = new Map();
+		var tparams:Array<TypeParamDecl> = [];
+		for (p in rc.typeParams) {
+			var b = try types.typeArg(p.bound, self) catch (_:Skip) null;
+			if (b == null) b = HId(false);
+			bounds.set(p.name, b);
+		}
+		for (p in rc.typeParams) {
+			var b = ctype(bounds.get(p.name), mod);
+			tparams.push({name: p.name, constraints: [b], defaultType: b});
+		}
+		var superArgs:Array<HType> = [];
+		var sc = c.superName != null ? r.classes.get(c.superName) : null;
+		if (sc != null && sc.typeParams.length > 0) {
+			var by = new Map<String, HType>();
+			var spelled = rc.superArgs != null && rc.superArgs.length == sc.typeParams.length ? rc.superArgs : null;
+			for (i in 0...sc.typeParams.length) {
+				var a = spelled == null ? null : try attempt(() -> types.typeArg({qual: spelled[i], desugared: spelled[i]}, self)) catch (_:Skip) null;
+				if (a != null) commit();
+				superArgs.push(a);
+			}
+			if (superArgs.indexOf(null) >= 0) superArgs = [];
+			for (i in 0...sc.typeParams.length)
+				by.set(sc.typeParams[i].name, superArgs.length > 0 ? superArgs[i] : HId(false));
+			for (k => f in st.initLike)
+				st.initLike.set(k, substRec(f, by));
+			for (k => f in st.factories)
+				st.factories.set(k, substRec(f, by));
+		}
 
 		// a member of another library's category carries its library
 		function libOf(m:Member):Null<Origin>
@@ -912,9 +1031,18 @@ class Gen {
 					if (seenProps.exists(k)) continue;
 					seenProps.set(k, true);
 					var readonly = ro && !propRW.exists(k);
+					within(m, name);
 					var h = try attempt(() -> types.map(t, self)) catch (s:Skip) {
 						skip(s.reason, s.what);
 						continue;
+					}
+					if (m.isStatic) {
+						var used = [];
+						paramsIn(h, used);
+						if (used.length > 0) {
+							skip("class property of a type parameter");
+							continue;
+						}
 					}
 					if (h == HVoid) {
 						skip("void property");
@@ -1009,6 +1137,7 @@ class Gen {
 			if (m.isStatic ? st.factories.exists(m.name) : st.sels.exists(m.name)) continue;
 			if (!valid(ps[0]) || (m.isStatic ? st.staticNames : st.names).exists(ps[0])) continue;
 			if (!m.isStatic && ps.length >= 2 && descendantClaims(name, ps[0], m.name)) continue;
+			within(m, name);
 			var sig = try attempt(() -> switch m.kind {
 				case KMethod(_, params, _): [for (p in params) sigKey(types.map(p.type, self))].join(",");
 				case _: throw "unreachable";
@@ -1040,6 +1169,7 @@ class Gen {
 					}
 					var sel = m.name;
 					var isIt = Types.isInstancetype(retT);
+					within(m, name);
 					var sig = try attempt(() -> {
 						ret: types.map(retT, self),
 						params: [for (p in params) types.map(p.type, self)]
@@ -1156,19 +1286,46 @@ class Gen {
 			tally(count, "redeclared instancetype methods (override)");
 		}
 
+		// covariant (an immutable collection): widened to a supertype's
+		// elements explicitly, Haxe's parameters being invariant
+		if (rc.typeParams.length > 0 && Lambda.foreach(rc.typeParams, p -> p.covariant) && !st.staticNames.exists("upcast")) {
+			var from = [], to = [], ups:Array<TypeParamDecl> = [];
+			for (p in rc.typeParams) {
+				var a = p.name + "From", b = p.name + "To";
+				ups.push({name: a, constraints: [TPath({pack: [], name: b})]});
+				ups.push({name: b, constraints: [ctype(bounds.get(p.name), mod)]});
+				from.push(TPType(TPath({pack: [], name: a})));
+				to.push(TPType(TPath({pack: [], name: b})));
+			}
+			fields.push({
+				name: "upcast",
+				access: [APublic, AStatic, AInline],
+				pos: POS,
+				kind: FFun({
+					params: ups,
+					args: [{name: "a", type: TPath({pack: [], name: name, params: from})}],
+					ret: TPath({pack: [], name: name, params: to}),
+					expr: {expr: EReturn({expr: ECast({expr: EConst(CIdent("a")), pos: POS}, null), pos: POS}), pos: POS}
+				})
+			});
+			tally(count, "covariant classes (upcast)");
+		}
 		var impl = adoptions(name, st, mod, tail);
+		// (a root class: any object, hxmc.objc.Id)
+		if (c.superName == null) impl.push({pack: ["hxmc", "objc"], name: "Id"});
 		var cm = [libMeta(c.origin), meta(":hxmc.objc")];
 		if (c.avail != null && c.avail.deprecated != null) cm.push(deprecatedMeta(c.avail.deprecated));
 		var sup = c.superName != null ? {
 			mod.use([packOf(classes.get(c.superName).origin)], c.superName);
-			{pack: [], name: c.superName};
+			{pack: [], name: c.superName, params: superArgs.length == 0 ? null : [for (a in superArgs) TPType(ctype(a, mod))]};
 		} : null;
+		if (rc.typeParams.length > 0) tally(count, "generic classes");
 		return {
 			pack: [packOf(c.origin)],
 			name: name,
 			pos: POS,
 			meta: cm,
-			params: [],
+			params: tparams,
 			isExtern: true,
 			kind: TDClass(sup, impl, false, false, false),
 			fields: head.concat(fields).concat(tail)
