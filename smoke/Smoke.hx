@@ -4,6 +4,8 @@ import coregraphics.*;
 import objc.NSObject;
 import hxmc.I64;
 import hxmc.objc.Selector;
+import hxmc.objc.ObjCClass;
+import hxmc.objc.Id;
 import hxmc.unsafe.Arena;
 import hxmc.unsafe.CString;
 import hxmc.unsafe.Ptr;
@@ -30,8 +32,20 @@ class XmlLog extends NSObject implements NSXMLParserDelegate {
 		log.push(foundCharacters.UTF8String.toString());
 }
 
+// a class AppKit sends a class method: the pasteboard asking which types it reads
+class Clip extends NSObject implements NSPasteboardReading {
+	public static var asked = 0;
+
+	public function new() {}
+
+	public static function readableTypesForPasteboard(pasteboard:NSPasteboard):NSArray<NSString> {
+		asked++;
+		return NSArray.arrayWithObject(Smoke.ns("org.example.clip"));
+	}
+}
+
 class Smoke {
-	static function ns(s:String):NSString
+	public static function ns(s:String):NSString
 		return Arena.scopedValue(a -> NSString.alloc().initWithUTF8String(a.cstring(s)));
 
 	static function str(s:NSString):String
@@ -133,6 +147,13 @@ class Smoke {
 		trace("font", font.CTFontGetSize(), font.CTFontCopyFamilyName().UTF8String.toString(), font.pointSize);
 		trace("constants", AppKit.NSFontAttributeName.UTF8String.toString(),
 			Foundation.NSStringFromRect(new CGRect(new CGPoint(1, 2), new CGSize(3, 4))).UTF8String.toString());
+		// class methods: a Haxe class's static AppKit sends (ObjCClass: the class itself)
+		var pb = NSPasteboard.pasteboardWithUniqueName();
+		pb.clearContents();
+		pb.setString(ns("hello"), ns("public.utf8-plain-text"));
+		var read = pb.readObjectsForClasses(NSArray.arrayWithObject((ObjCClass.of(Clip) : Id)), null);
+		trace("pasteboard", Clip.asked > 0, read == null ? -1 : read.count, (cast ObjCClass.of(Clip) : NSObject).respondsToSelector(Selector.of("readableTypesForPasteboard:")));
+		pb.releaseGlobally();
 		done();
 	}
 }

@@ -534,7 +534,7 @@ class Gen {
 				done.set("P:" + name, true);
 				progress = true;
 				for (m in protos.get(name).members) {
-					if (unavailable(m.avail) || m.isStatic) continue;
+					if (unavailable(m.avail)) continue;
 					within(m, null);
 					try {
 						attempt(() -> switch m.kind {
@@ -1002,10 +1002,8 @@ class Gen {
 		for (m in p.members) {
 			where = name + " (protocol) " + (m.isStatic ? "+" : "-") + m.name;
 			if (unavailable(m.avail)) continue;
-			if (m.isStatic) {
-				skip("class member of a protocol");
-				continue;
-			}
+			// (class members: statics of the interface, protoDef)
+			if (m.isStatic) continue;
 			if (m.kind.match(KMethod(_, _, _)) && MEMORY.indexOf(m.name) >= 0) {
 				skip("memory management (the compiler's)");
 				continue;
@@ -1095,6 +1093,62 @@ class Gen {
 		return info;
 	}
 
+	// a protocol's class members (`+`): statics of its extern interface, which
+	// Haxe allows there; a class conforming implements them as its statics
+	// (hxmc registers those on its metaclass), and they are sent to classes
+	function classMembers(p:Container, fields:Array<Field>, mod:Module) {
+		var names = new Map<String, Bool>();
+		for (f in fields)
+			names.set(f.name, true);
+		for (m in p.members) {
+			if (!m.isStatic || unavailable(m.avail)) continue;
+			where = p.name + " (protocol) +" + m.name;
+			within(m, null);
+			var depr = m.avail != null ? m.avail.deprecated : null;
+			switch m.kind {
+				case KProperty(t, ro, getter, _):
+					var h = try attempt(() -> types.map(t, "NSObject")) catch (s:Skip) {
+						skip(s.reason, s.what);
+						continue;
+					}
+					if (h == HVoid) continue;
+					commit();
+					var pname = ident(m.name);
+					while (names.exists(pname) || names.exists("get_" + pname))
+						pname += "_";
+					var getSel = getter != null ? getter : m.name;
+					fields.push({name: pname, access: [AStatic], meta: [], pos: POS, kind: FProp("get", "never", ctype(h, mod))});
+					fields.push(methodField({
+						name: "get_" + pname, sel: getSel, isStatic: true, params: [], ret: h, selMeta: pname != m.name || getSel != m.name, lib: null,
+						deprecated: depr, instancetype: false, accessor: true, isOverload: false
+					}, h, false, mod));
+					names.set(pname, true);
+					names.set("get_" + pname, true);
+					tally(count, "protocol class properties");
+				case KMethod(retT, params, variadic):
+					if (variadic) {
+						skip("variadic");
+						continue;
+					}
+					var sig = try attempt(() -> {
+						ret: types.map(retT, "NSObject"),
+						params: [for (q in params) types.map(q.type, "NSObject")]
+					}) catch (s:Skip) {
+						skip(s.reason, s.what);
+						continue;
+					}
+					commit();
+					var n = naming(m.name, params, s -> names.exists(s));
+					fields.push(methodField({
+						name: n.name, sel: m.name, isStatic: true, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
+						ret: sig.ret, selMeta: n.selMeta, lib: null, deprecated: depr, instancetype: false, accessor: false, isOverload: false
+					}, sig.ret, false, mod));
+					names.set(n.name, true);
+					tally(count, "protocol class methods");
+			}
+		}
+	}
+
 	public function protoDef(name:String, mod:Module):TypeDefinition {
 		var p = protos.get(name);
 		var info = protoInfo(name);
@@ -1118,6 +1172,7 @@ class Gen {
 		}
 		for (m in info.methods)
 			if (m.owner == name) fields.push(optional(methodField(m.rec, m.rec.ret, false, mod), m.optional));
+		classMembers(p, fields, mod);
 		var parents = [];
 		for (q in p.protocols)
 			if (protos.exists(q) && protosIncluded.exists(q)) {

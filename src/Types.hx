@@ -300,7 +300,7 @@ class Types {
 				var list = ~/\bid\s*<([^>]*)>/;
 				var h = list.match(d) || list.match(t.qual) ? gen.useProtocol([for (p in list.matched(1).split(",")) p.trim()], nullable(t.qual)) : null;
 				h != null ? h : HId(nullable(t.qual));
-			case "Class": PTR;
+			case "Class": inStruct ? PTR : HPrim(["hxmc", "objc"], "ObjCClass");
 			case "SEL": HPrim(["hxmc", "objc"], "Selector");
 			case "long double": throw new Skip("long double");
 			case "__int128" | "unsigned __int128": throw new Skip("128-bit integer");
