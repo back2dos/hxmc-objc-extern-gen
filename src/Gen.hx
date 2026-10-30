@@ -587,9 +587,21 @@ class Gen {
 	static function isObject(h:HType):Bool
 		return h.match(HClass(_, _, _) | HCF(_, _) | HId(_) | HProto(_, _) | HParam(_, _));
 
-	// whether h takes a block, which a C function's signature cannot (yet)
+	// whether h is a block
 	static function hasBlock(h:HType):Bool
 		return h.match(HFun(_, _, _));
+
+	// a C function's parameter or result: a block is hxmc.objc.Block<F> there
+	// (a message's signature says it of a function type; a C function's does
+	// not), converted from and to a function F where it is passed
+	function cParamType(h:HType, mod:Module):ComplexType
+		return switch h {
+			case HFun(args, ret, nullable):
+				mod.use(["hxmc", "objc"], "Block");
+				var b = TPath({pack: [], name: "Block", params: [TPType(ctype(HFun(args, ret, false), mod))]});
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(b)]}) : b;
+			case _: ctype(h, mod);
+		}
 
 	// the C functions of the frameworks in scope: those with a symbol whose
 	// types map; an object result's ownership by Core Foundation's rules for
@@ -628,7 +640,6 @@ class Gen {
 					var cfRet = spelledCF;
 					var params = [for (p in f.params) {name: p.name, t: types.map(p.type, "")}];
 					if (params.length == 1 && params[0].t == HVoid) params = [];
-					if (hasBlock(ret) || Lambda.exists(params, p -> hasBlock(p.t))) throw new Skip("C function with a block");
 					for (p in params)
 						if (p.t == HVoid) throw new Skip("C function with a void parameter");
 					// (memory is the compiler's: CFRetain, CGColorRelease, CFAutorelease)
@@ -720,14 +731,14 @@ class Gen {
 				while (pnames.indexOf(n) >= 0)
 					n += "_";
 				pnames.push(n);
-				args.push({name: n, type: ctype(p.t, g.mod)});
+				args.push({name: n, type: cParamType(p.t, g.mod)});
 			}
 			g.fields.push({
 				name: ident(k.f.name),
 				access: [APublic, AStatic],
 				meta: m,
 				pos: POS,
-				kind: FFun({args: args, ret: ctype(k.ret, g.mod), expr: null})
+				kind: FFun({args: args, ret: cParamType(k.ret, g.mod), expr: null})
 			});
 		}
 		for (k in varsKept) {

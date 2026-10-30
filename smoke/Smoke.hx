@@ -123,8 +123,11 @@ class Smoke {
 		ctx.CGContextSetFillColorWithColor(CoreGraphics.CGColorCreateSRGB(1, 0, 0, 1));
 		ctx.CGContextAddPath(path);
 		ctx.CGContextFillPath();
+		// (a block through a C function: Block<F>, from a function)
+		var elements = [];
+		path.CGPathApplyWithBlock(e -> elements.push(Mem.getI32(e, 0)));
 		var px = ctx.CGBitmapContextGetData();
-		trace("drawn", [for (i in 0...4) Mem.getU8(px, 20 + i)], [for (i in 0...4) Mem.getU8(px, i)], path.CGPathGetBoundingBox().size.width,
+		trace("drawn", elements, [for (i in 0...4) Mem.getU8(px, 20 + i)], [for (i in 0...4) Mem.getU8(px, i)], path.CGPathGetBoundingBox().size.width,
 			CoreGraphics.CGRectZero.size.width);
 		var font = CoreText.CTFontCreateWithName(ns("Helvetica"), 12, Ptr.nil());
 		trace("font", font.CTFontGetSize(), font.CTFontCopyFamilyName().UTF8String.toString(), font.pointSize);
