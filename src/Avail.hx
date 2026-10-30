@@ -10,6 +10,11 @@ using StringTools;
 class Avail {
 	var map = new Map<String, Availability>();
 
+	// the Objective-C classes C's structs are objects of (`CF_BRIDGED_TYPE`),
+	// by tag: the class (`NSString`, or `id`: an object of no class) and the
+	// mutable one; JSON's ObjCBridgeAttr names neither
+	public var bridges = new Map<String, {objc:Null<String>, mutable:Null<String>}>();
+
 	public function new() {}
 
 	public function get(key:String):Null<Availability>
@@ -125,6 +130,10 @@ class Avail {
 			var rest = text.substring(j, end);
 			if (kind.endsWith("Attr")) {
 				var p = stack[depth - 1];
+				if (p != null && p.kind == "RecordDecl" && (kind == "ObjCBridgeAttr" || kind == "ObjCBridgeMutableAttr")) {
+					bridge(beforeQuote(p.text.replace(" definition", "")), kind == "ObjCBridgeMutableAttr", rest);
+					continue;
+				}
 				if (p != null) {
 					var a = attr(kind, rest);
 					if (a != null) p.avail = merge(p.avail, a);
@@ -145,6 +154,9 @@ class Avail {
 			}
 			stack.push(switch kind {
 				case "ObjCInterfaceDecl" | "ObjCCategoryDecl" | "ObjCProtocolDecl" | "EnumDecl" | "ObjCMethodDecl" | "ObjCPropertyDecl" | "EnumConstantDecl":
+					new Node(kind, afterLoc(rest), parent);
+				// (C's: at the top level only, not a function body's)
+				case "FunctionDecl" | "VarDecl" | "RecordDecl" if (depth == 1):
 					new Node(kind, afterLoc(rest), parent);
 				case _: null;
 			});
@@ -196,9 +208,22 @@ class Avail {
 				c != null ? c + "|@" + beforeQuote(n.text) : null;
 			case "EnumDecl": beforeQuote(n.text) == "" ? null : "E:" + beforeQuote(n.text);
 			case "EnumConstantDecl": "K:" + beforeQuote(n.text);
+			case "FunctionDecl": "F:" + beforeQuote(n.text);
+			case "VarDecl": "V:" + beforeQuote(n.text);
+			case "RecordDecl": null;
 			case _: containerKey(n);
 		}
 		if (key != null) add(key, n.avail);
+	}
+
+	// a struct's bridge (`ObjCBridgeAttr ... NSString`); an inherited one
+	// (a later declaration's) names its class again or nothing
+	function bridge(tag:String, mutable:Bool, args:String) {
+		var t = [for (w in tokens(args)) if (w != "Inherited" && w != "Implicit") w];
+		if (tag == "" || t.length == 0) return;
+		var b = bridges.get(tag);
+		if (b == null) bridges.set(tag, b = {objc: null, mutable: null});
+		if (mutable) b.mutable = t[0] else b.objc = t[0];
 	}
 }
 

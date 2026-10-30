@@ -101,11 +101,25 @@ class Gen {
 	var enumsUsed = new Map<String, EnumInfo>();
 	var structOk = new Map<String, Null<String>>(); // record id -> why it cannot be passed (null: it can)
 
+	// objects of C (docs/interop.md, "Objects of C"): by the bridged struct's
+	// tag, the class of its const typedef (CGPathRef: CGPath) and of its other
+	// one (CGMutablePathRef: CGMutablePath, a subclass), or the only one
+	var cfByTag = new Map<String, {base:Null<String>, mutable:Null<String>, origin:Origin}>();
+	var cfTag = new Map<String, String>(); // class -> tag
+	var cfUsed = new Map<String, Bool>();
+	// the C functions and variables of the frameworks in scope kept
+	var funcsKept:Array<{f:CFunc, ret:HType, params:Array<{name:String, t:HType}>, retained:Bool}> = [];
+	var varsKept:Array<{v:CVar, t:HType}> = [];
+
 	// what the type being mapped references (committed when its member is kept)
 	var refs:Array<String> = [];
 	var protoRefs:Array<String> = [];
 	var structRefs:Array<RecordInfo> = [];
 	var enumRefs:Array<EnumInfo> = [];
+	var cfRefs:Array<String> = [];
+	// the type mapped last was C's object (a CF type: Core Foundation's
+	// ownership rules apply, not Objective-C's)
+	public var spelledCF = false;
 
 	public var skipped = new Map<String, Int>();
 	public var count = new Map<String, Int>();
@@ -186,7 +200,54 @@ class Gen {
 		}
 		for (e in r.enums)
 			if (e.name != null && !enumByName.exists(e.name)) enumByName.set(e.name, e);
+		// objects of C: the `…Ref` typedefs of pointers to bridged structs
+		var ptr = ~/^(const )?struct (\w+) \*$/;
+		var tds = [for (td in r.typedefs) td];
+		tds.sort((a, b) -> Reflect.compare(a.name, b.name));
+		for (td in tds) {
+			if (!td.name.endsWith("Ref") || td.name.length <= 3 || !ptr.match(td.type.desugared.trim())) continue;
+			var tag = ptr.matched(2);
+			if (!r.bridges.exists(tag)) continue;
+			var cls = td.name.substr(0, td.name.length - 3);
+			var e = cfByTag.get(tag);
+			if (e == null) cfByTag.set(tag, e = {base: null, mutable: null, origin: td.origin});
+			// (one of each: a second name of the same, a typedef of a typedef, is not a class)
+			if (ptr.matched(1) != null && e.base == null) e.base = cls;
+			else if (ptr.matched(1) == null && e.mutable == null) e.mutable = cls;
+			else continue;
+			cfTag.set(cls, tag);
+		}
+		// (only one typedef, not const: CGColorRef, the class itself)
+		for (e in cfByTag)
+			if (e.base == null) {
+				e.base = e.mutable;
+				e.mutable = null;
+			}
 	}
+
+	// a pointer to the struct `tag` (const), spelled `spelled`: an object of C
+	// (an HCF), or of its toll-free bridged Objective-C class (CFStringRef:
+	// NSString); null: not an object
+	public function useCF(tag:String, constant:Bool, spelled:String, nullable:Bool):Null<HType> {
+		var b = r.bridges.get(tag);
+		if (b == null) return null;
+		var objc = !constant && b.mutable != null && b.mutable != "id" ? b.mutable : b.objc;
+		if (objc != null && objc != "id" && isClass(objc)) {
+			spelledCF = true;
+			return useClass(objc, nullable);
+		}
+		var e = cfByTag.get(tag);
+		if (e == null) return null;
+		var own = spelled.endsWith("Ref") ? spelled.substr(0, spelled.length - 3) : "";
+		var name = cfTag.get(own) == tag ? own : constant || e.mutable == null ? e.base : e.mutable;
+		spelledCF = true;
+		cfRefs.push(name);
+		return HCF(name, nullable);
+	}
+
+	// CFTypeRef: any object, of C's rules
+	public function markCF()
+		spelledCF = true;
 
 	// why a category of NSObject is an informal protocol (methods for other
 	// objects to implement: delegates, data sources, validation, actions,
@@ -365,10 +426,17 @@ class Gen {
 		protoRefs = [];
 		structRefs = [];
 		enumRefs = [];
+		cfRefs = [];
 		return f();
 	}
 
 	function commit() {
+		for (n in cfRefs) {
+			cfUsed.set(n, true);
+			// (a mutable one's superclass)
+			var e = cfByTag.get(cfTag.get(n));
+			if (e.mutable == n) cfUsed.set(e.base, true);
+		}
 		for (n in refs)
 			include(n);
 		for (p in protoRefs)
@@ -455,6 +523,8 @@ class Gen {
 			if (scope.indexOf(c.origin.framework) >= 0) include(name);
 		for (name => p in protos)
 			if (scope.indexOf(p.origin.framework) >= 0) includeProto(name);
+		cFunctions();
+		cVariables();
 		var done = new Map<String, Bool>();
 		var progress = true;
 		while (progress) {
@@ -511,6 +581,207 @@ class Gen {
 			if (scope.indexOf(rec.origin.framework) >= 0 && structCheck(rec) == null) useStructDeep(rec);
 	}
 
+	// --- C's functions and variables ---
+
+	// an object: what ownership concerns
+	static function isObject(h:HType):Bool
+		return h.match(HClass(_, _, _) | HCF(_, _) | HId(_) | HProto(_, _) | HParam(_, _));
+
+	// whether h takes a block, which a C function's signature cannot (yet)
+	static function hasBlock(h:HType):Bool
+		return h.match(HFun(_, _, _));
+
+	// the C functions of the frameworks in scope: those with a symbol whose
+	// types map; an object result's ownership by Core Foundation's rules for
+	// C's objects (an audited region's Create rule, CF_RETURNS_RETAINED), by
+	// ARC's for Objective-C's (borrowed unless NS_RETURNS_RETAINED);
+	// reference counting is the compiler's (CFRetain, CGColorRelease: left out)
+	function cFunctions() {
+		var fs = [for (f in r.functions) if (scope.indexOf(f.origin.framework) >= 0) f];
+		fs.sort((a, b) -> Reflect.compare(a.name, b.name));
+		for (f in fs) {
+			where = f.origin.framework + ": " + f.name;
+			if (unavailable(f.avail)) {
+				skip("C function unavailable on macOS");
+				continue;
+			}
+			if (f.name.startsWith("_")) {
+				skip("C function: private (_)");
+				continue;
+			}
+			if (f.headerOnly) {
+				skip("C function only in its header (static inline: no symbol)");
+				continue;
+			}
+			if (f.variadic) {
+				skip("C function: variadic");
+				continue;
+			}
+			if (f.consumes) {
+				skip("C function consuming an argument (CF_CONSUMED)");
+				continue;
+			}
+			try {
+				var kept = attempt(() -> {
+					spelledCF = false;
+					var ret = types.map(f.ret, "");
+					var cfRet = spelledCF;
+					var params = [for (p in f.params) {name: p.name, t: types.map(p.type, "")}];
+					if (params.length == 1 && params[0].t == HVoid) params = [];
+					if (hasBlock(ret) || Lambda.exists(params, p -> hasBlock(p.t))) throw new Skip("C function with a block");
+					for (p in params)
+						if (p.t == HVoid) throw new Skip("C function with a void parameter");
+					// (memory is the compiler's: CFRetain, CGColorRelease, CFAutorelease)
+					if ((f.name.endsWith("Retain") || f.name.endsWith("Release") || f.name.endsWith("Autorelease") || f.name == "CFMakeCollectable")
+						&& params.length == 1 && isObject(params[0].t))
+						throw new Skip("C function: reference counting (the compiler's)");
+					var retained = false;
+					if (isObject(ret)) {
+						if (f.retained != null) retained = f.retained;
+						else if (cfRet) {
+							if (!f.audited) throw new Skip("C function returning C's object: ownership not audited");
+							retained = f.name.indexOf("Create") >= 0 || f.name.indexOf("Copy") >= 0;
+						}
+					}
+					{f: f, ret: ret, params: params, retained: retained};
+				});
+				commit();
+				funcsKept.push(kept);
+				tally(count, "C functions");
+			} catch (s:Skip) {
+				skip(s.reason, s.what);
+			}
+		}
+		where = "";
+	}
+
+	// the `extern` variables of the frameworks in scope: constants and others
+	function cVariables() {
+		var vs = [for (v in r.vars) if (scope.indexOf(v.origin.framework) >= 0) v];
+		vs.sort((a, b) -> Reflect.compare(a.name, b.name));
+		for (v in vs) {
+			where = v.origin.framework + ": " + v.name;
+			if (unavailable(v.avail)) {
+				skip("C variable unavailable on macOS");
+				continue;
+			}
+			if (v.name.startsWith("_")) {
+				skip("C variable: private (_)");
+				continue;
+			}
+			try {
+				var t = attempt(() -> {
+					var t = types.map(v.type, "");
+					if (hasBlock(t) || t == HVoid) throw new Skip("C variable of a block or void");
+					t;
+				});
+				commit();
+				varsKept.push({v: v, t: t});
+				tally(count, "C variables");
+			} catch (s:Skip) {
+				skip(s.reason, s.what);
+			}
+		}
+		where = "";
+	}
+
+	// the class of a framework's C functions and variables (`coregraphics.CoreGraphics`)
+	public function cDefs(taken:String->Bool):Array<{def:TypeDefinition, mod:Module}> {
+		var byPack = new Map<String, {origin:Origin, fields:Array<Field>, mod:Module}>();
+		var order = [];
+		function group(o:Origin) {
+			var k = packOf(o);
+			var g = byPack.get(k);
+			if (g == null) {
+				byPack.set(k, g = {origin: o, fields: [], mod: new Module(k)});
+				order.push(k);
+			}
+			// (the framework's own library, not a sub-framework's)
+			if (g.origin.lib != null && o.lib == null) g.origin = o;
+			return g;
+		}
+		function fieldMeta(cname:String, o:Origin, g:{origin:Origin}, avail:Null<Availability>):Metadata {
+			var m:Metadata = [];
+			if (ident(cname) != cname) m.push(meta(":native", [str(cname)]));
+			if (o.lib != g.origin.lib) m.push(libMeta(o));
+			if (avail != null && avail.deprecated != null) m.push(deprecatedMeta(avail.deprecated));
+			return m;
+		}
+		for (k in funcsKept) group(k.f.origin);
+		for (k in varsKept) group(k.v.origin);
+		for (k in funcsKept) {
+			var g = group(k.f.origin);
+			var m = fieldMeta(k.f.name, k.f.origin, g, k.f.avail);
+			if (k.retained) m.push(meta(":hxmc.retained"));
+			var pnames = [];
+			var args = [];
+			for (p in k.params) {
+				var n = ident(p.name);
+				while (pnames.indexOf(n) >= 0)
+					n += "_";
+				pnames.push(n);
+				args.push({name: n, type: ctype(p.t, g.mod)});
+			}
+			g.fields.push({
+				name: ident(k.f.name),
+				access: [APublic, AStatic],
+				meta: m,
+				pos: POS,
+				kind: FFun({args: args, ret: ctype(k.ret, g.mod), expr: null})
+			});
+		}
+		for (k in varsKept) {
+			var g = group(k.v.origin);
+			// (an object's: hxmc reads such variables only)
+			var readOnly = k.v.isConst || isObject(k.t);
+			g.fields.push({
+				name: ident(k.v.name),
+				access: readOnly ? [APublic, AStatic, AFinal] : [APublic, AStatic],
+				meta: fieldMeta(k.v.name, k.v.origin, g, k.v.avail),
+				pos: POS,
+				kind: FVar(ctype(k.t, g.mod), null)
+			});
+		}
+		var r = [];
+		for (k in order) {
+			var g = byPack.get(k);
+			var name = ident(g.origin.framework == "" ? "CLib" : g.origin.framework);
+			while (taken(name))
+				name += "_";
+			r.push({
+				def: {
+					pack: [k],
+					name: name,
+					pos: POS,
+					meta: [meta(":hxmc.c"), libMeta(g.origin)],
+					params: [],
+					isExtern: true,
+					kind: TDClass(null, [], false, false, false),
+					fields: g.fields
+				},
+				mod: g.mod
+			});
+		}
+		return r;
+	}
+
+	// an object of C: an extern class implementing Id (a mutable one
+	// extending its immutable one)
+	public function cfDef(name:String):TypeDefinition {
+		var e = cfByTag.get(cfTag.get(name));
+		tally(count, "objects of C");
+		return {
+			pack: [packOf(e.origin)],
+			name: name,
+			pos: POS,
+			params: [],
+			kind: e.mutable == name ? TDClass({pack: [], name: e.base}, [], false, false, false) : TDClass(null, [{pack: ["hxmc", "objc"], name: "Id"}], false,
+				false, false),
+			isExtern: true,
+			fields: []
+		};
+	}
+
 	// --- names ---
 
 	public static function valid(s:String):Bool
@@ -538,6 +809,7 @@ class Gen {
 			case HParam(name, _): "T:" + name;
 			case HId(_): "Id";
 			case HProto(name, _): "P:" + name;
+			case HCF(name, _): name;
 			case HFun(args, ret, _): "(" + [for (a in args) sigKey(a)].join(",") + ")->" + sigKey(ret);
 			case HStruct(rec): rec.name;
 			case HEnum(e): e.name;
@@ -605,6 +877,9 @@ class Gen {
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
 			case HProto(name, nullable):
 				var c = path([packOf(protos.get(name).origin)], protoName(name));
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+			case HCF(name, nullable):
+				var c = path([packOf(cfByTag.get(cfTag.get(name)).origin)], name);
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
 			case HFun(args, ret, nullable):
 				var f = TFunction([for (a in args) ctype(a, mod)], ctype(ret, mod));
@@ -1679,6 +1954,20 @@ class Gen {
 			names.set(n, true);
 		}
 		for (c in constantsDefs(n -> names.exists(n))) {
+			emit(c.def, c.mod);
+			names.set(c.def.name, true);
+		}
+		var cfs = [for (k in cfUsed.keys()) k];
+		cfs.sort(Reflect.compare);
+		for (n in cfs) {
+			if (names.exists(n)) {
+				skip("object of C named like another type");
+				continue;
+			}
+			emit(cfDef(n), new Module(packOf(cfByTag.get(cfTag.get(n)).origin)));
+			names.set(n, true);
+		}
+		for (c in cDefs(n -> names.exists(n))) {
 			emit(c.def, c.mod);
 			names.set(c.def.name, true);
 		}

@@ -15,6 +15,12 @@ class Reader {
 	public var records = new Map<String, RecordInfo>(); // by id of the definition
 	public var recordsByTag = new Map<String, RecordInfo>();
 	public var typedefs = new Map<String, Typedef>();
+	public var functions = new Map<String, CFunc>();
+	public var vars = new Map<String, CVar>();
+	public var bridges(get, never):Map<String, {objc:Null<String>, mutable:Null<String>}>;
+
+	function get_bridges()
+		return avail.bridges;
 
 	var file = "";
 	var origins = new Map<String, Origin>();
@@ -92,7 +98,11 @@ class Reader {
 				case "RecordDecl":
 					recordDecl(n, o);
 				case "TypedefDecl":
-					typedefDecl(n);
+					typedefDecl(n, o);
+				case "FunctionDecl":
+					functionDecl(n, o);
+				case "VarDecl":
+					varDecl(n, o);
 				case _:
 					walkChildren(n);
 			}
@@ -344,9 +354,57 @@ class Reader {
 		return null;
 	}
 
-	function typedefDecl(n:Dynamic) {
+	function typedefDecl(n:Dynamic, o:Origin) {
 		walkChildren(n);
 		var name:String = n.name;
-		if (!typedefs.exists(name)) typedefs.set(name, {name: name, type: ctype(n.type), tagId: tagOf(n)});
+		if (!typedefs.exists(name)) typedefs.set(name, {name: name, type: ctype(n.type), tagId: tagOf(n), origin: o});
+	}
+
+	// a C function's declaration (the first; a later one, an inline
+	// function's definition, marks it too)
+	function functionDecl(n:Dynamic, o:Origin) {
+		var name:String = n.name;
+		var q:String = n.type.qualType;
+		var paren = q.indexOf("(");
+		var f = functions.get(name);
+		if (f == null) {
+			f = new CFunc(name, {qual: q.substring(0, paren < 0 ? q.length : paren).trim(), desugared: ""}, o);
+			f.ret.desugared = f.ret.qual;
+			f.variadic = n.variadic == true;
+			f.avail = avail.get("F:" + name);
+			functions.set(name, f);
+		}
+		if (n.storageClass == "static" || Reflect.field(n, "inline") == true) f.headerOnly = true;
+		var inner:Array<Dynamic> = n.inner;
+		var params = [];
+		if (inner != null)
+			for (c in inner) {
+				locate(c);
+				switch (c.kind : String) {
+					case "ParmVarDecl":
+						params.push({name: c.name != null ? c.name : "p" + params.length, type: ctype(c.type)});
+						var pi:Array<Dynamic> = c.inner;
+						if (pi != null && Lambda.exists(pi, a -> a.kind == "CFConsumedAttr" || a.kind == "NSConsumedAttr")) f.consumes = true;
+					case "CFAuditedTransferAttr": f.audited = true;
+					case "CFReturnsRetainedAttr" | "NSReturnsRetainedAttr": f.retained = true;
+					case "CFReturnsNotRetainedAttr" | "NSReturnsNotRetainedAttr": f.retained = false;
+					case _:
+				}
+				walkChildren(c);
+			}
+		if (f.params.length == 0) f.params = params;
+	}
+
+	// an `extern` variable; `const` at its top level (`NSString *const`,
+	// `const CGRect`) a constant
+	function varDecl(n:Dynamic, o:Origin) {
+		walkChildren(n);
+		if (n.storageClass != "extern") return;
+		var name:String = n.name;
+		if (vars.exists(name)) return;
+		var t = ctype(n.type);
+		var d = t.desugared.trim();
+		var isConst = d.endsWith("const") || (d.indexOf("*") < 0 && d.startsWith("const "));
+		vars.set(name, {name: name, type: t, isConst: isConst, origin: o, avail: avail.get("V:" + name)});
 	}
 }

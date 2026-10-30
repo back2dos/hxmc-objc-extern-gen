@@ -7,6 +7,11 @@ import hxmc.objc.Selector;
 import hxmc.unsafe.Arena;
 import hxmc.unsafe.CString;
 import hxmc.unsafe.Ptr;
+import hxmc.unsafe.Mem;
+import coretext.CoreText;
+
+using coregraphics.CoreGraphics;
+using coretext.CoreText;
 
 // Uses of the generated declarations that are lowered and run (macOS):
 //   npm run gen, then with hxmc's Objective-C interop:
@@ -107,6 +112,24 @@ class Smoke {
 		trace("anchor", c != null);
 		trace("options", o.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(NSFileCoordinatorReadingOptions.ForUploading),
 			NSFileCoordinatorReadingOptions.None.has(NSFileCoordinatorReadingOptions.WithoutChanges), o.has(None));
+		// C's functions, objects and constants: drawing with Core Graphics
+		// (`using`: its functions as methods of their first argument), a Core
+		// Text font (toll-free bridged: an NSFont), AppKit's and Foundation's
+		var space = CoreGraphics.CGColorSpaceCreateDeviceRGB();
+		// (premultiplied last: kCGImageAlphaPremultipliedLast)
+		var ctx = CoreGraphics.CGBitmapContextCreate(Ptr.nil(), 4, 4, 8, 16, space, cast 1);
+		var path = CoreGraphics.CGPathCreateMutable();
+		path.CGPathAddRect(Ptr.nil(), new CGRect(new CGPoint(1, 1), new CGSize(2, 2)));
+		ctx.CGContextSetFillColorWithColor(CoreGraphics.CGColorCreateSRGB(1, 0, 0, 1));
+		ctx.CGContextAddPath(path);
+		ctx.CGContextFillPath();
+		var px = ctx.CGBitmapContextGetData();
+		trace("drawn", [for (i in 0...4) Mem.getU8(px, 20 + i)], [for (i in 0...4) Mem.getU8(px, i)], path.CGPathGetBoundingBox().size.width,
+			CoreGraphics.CGRectZero.size.width);
+		var font = CoreText.CTFontCreateWithName(ns("Helvetica"), 12, Ptr.nil());
+		trace("font", font.CTFontGetSize(), font.CTFontCopyFamilyName().UTF8String.toString(), font.pointSize);
+		trace("constants", AppKit.NSFontAttributeName.UTF8String.toString(),
+			Foundation.NSStringFromRect(new CGRect(new CGPoint(1, 2), new CGSize(3, 4))).UTF8String.toString());
 		done();
 	}
 }

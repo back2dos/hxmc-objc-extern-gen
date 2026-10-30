@@ -10,6 +10,7 @@ enum HType {
 	HParam(name:String, nullable:Bool); // a type parameter of the class (or of a static method, the class's)
 	HId(nullable:Bool); // id: hxmc.objc.Id, any object
 	HProto(name:String, nullable:Bool); // id<P>: the protocol's interface
+	HCF(name:String, nullable:Bool); // an object of C (CGColorRef): an extern class implementing Id
 	HFun(args:Array<HType>, ret:HType, nullable:Bool); // a block: a Haxe function
 	HStruct(r:RecordInfo);
 	HEnum(e:EnumInfo);
@@ -195,6 +196,7 @@ class Types {
 			case HProto(n, _): HProto(n, false);
 			case HParam(n, _): HParam(n, false);
 			case HId(_): HId(false);
+			case HCF(n, _): HCF(n, false);
 			case _: null;
 		}
 	}
@@ -208,6 +210,12 @@ class Types {
 		if (scope.exists(first) && t.qual.indexOf("*") < 0 && t.qual.indexOf("(^") < 0) return HParam(scope.get(first), nullable(t.qual));
 		// SEL desugars to a pointer to a struct
 		if (t.qual.indexOf("*") < 0 && firstName(t.qual) == "SEL") return HPrim(["hxmc", "objc"], "Selector");
+		// CFTypeRef (`const void *`): any object
+		if (t.qual.indexOf("*") < 0 && first == "CFTypeRef") {
+			if (inStruct) return PTR;
+			gen.markCF();
+			return HId(nullable(t.qual));
+		}
 		var d = t.desugared;
 		if (d.indexOf("__attribute__") >= 0) throw new Skip("vector type");
 		if (stripAngles(d).indexOf("(^") >= 0) {
@@ -252,6 +260,13 @@ class Types {
 			}
 			if (td.type.desugared == name) throw new Skip("opaque typedef", name);
 			return map({qual: t.qual, desugared: td.type.desugared}, self, inStruct, depth + 1);
+		}
+		// a pointer to a struct that is an object (CF_BRIDGED_TYPE: CGColorRef,
+		// CFStringRef), the typedef that names it as spelled
+		if (stars == 1 && tag == "struct" && !inStruct) {
+			var constant = ws.indexOf("const") >= 0 && ws.indexOf("const") < ws.indexOf("*");
+			var h = gen.useCF(name, constant, first, nullable(t.qual));
+			if (h != null) return h;
 		}
 		if (stars == 1) {
 			if (tag != "" || builtin(name) != null || name == "id" || name == "Class" || name == "SEL" || name == "Protocol") return PTR;

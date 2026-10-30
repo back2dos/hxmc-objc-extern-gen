@@ -122,4 +122,29 @@ class RecordInfo {
 	}
 }
 
-typedef Typedef = {name:String, type:CType, tagId:Null<String>};
+typedef Typedef = {name:String, type:CType, tagId:Null<String>, origin:Origin};
+
+// a C function: `headerOnly` one only in its header (no symbol); `audited`: in a
+// region of the Create rule (CF_IMPLICIT_BRIDGING_ENABLED), `retained` an
+// explicit CF_RETURNS_RETAINED (true) or CF_RETURNS_NOT_RETAINED (false)
+class CFunc {
+	public var name:String;
+	public var ret:CType;
+	public var params:Array<Param> = [];
+	public var variadic:Bool = false;
+	public var headerOnly:Bool = false; // static inline: no symbol
+	public var audited:Bool = false;
+	public var retained:Null<Bool>;
+	public var consumes:Bool = false; // a parameter CF_CONSUMED
+	public var origin:Origin;
+	public var avail:Null<Availability>;
+
+	public function new(name, ret, origin) {
+		this.name = name;
+		this.ret = ret;
+		this.origin = origin;
+	}
+}
+
+// a C variable (`extern`): `const` at its top level, a constant
+typedef CVar = {name:String, type:CType, isConst:Bool, origin:Origin, avail:Null<Availability>};

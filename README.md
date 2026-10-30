@@ -2,7 +2,7 @@
 
 > **Experimental.** A work in progress, made to find out what the declarations should look like. Expect the output, the rules behind it and the tool itself to change.
 
-Generates Haxe extern declarations of the macOS SDK's Objective-C APIs (Foundation and AppKit so far) for [hxmc](https://github.com/benmerckx/hxmc)'s Objective-C interop, from clang's AST of the SDK's headers.
+Generates Haxe extern declarations of the macOS SDK's Objective-C and C APIs (Foundation, AppKit, Core Graphics, Core Text, Core Animation and Uniform Type Identifiers by default) for [hxmc](https://github.com/benmerckx/hxmc)'s Objective-C interop, from clang's AST of the SDK's headers.
 
 Using the generated declarations needs hxmc's Objective-C interop, which is not published yet. The generator itself is plain Haxe and builds with the published hxmc.
 
@@ -15,7 +15,7 @@ npm install
 npm run gen        # builds bin/objc-extern-gen, writes out/
 ```
 
-`bin/objc-extern-gen <out-dir> [--frameworks Foundation,AppKit] [--check]` writes a package per framework (`appkit.NSView`, `foundation.NSString`, ...), one module per class or protocol, `skipped.txt` (what was left out and why) and, with `--check`, `ObjcExternsCheck.hx`, a program naming every type. `--json` and `--text` read existing dumps instead of running clang.
+`bin/objc-extern-gen <out-dir> [--frameworks Foundation,AppKit,...] [--check]` writes a package per framework (`appkit.NSView`, `foundation.NSString`, ...), one module per class or protocol, `skipped.txt` (what was left out and why) and, with `--check`, `ObjcExternsCheck.hx`, a program naming every type. `--json` and `--text` read existing dumps instead of running clang.
 
 The generated declarations are derived from Apple's headers: they are not part of this repository, and they carry none of the headers' comments.
 
@@ -31,6 +31,8 @@ What the declarations make of the headers (decided in [#1](https://github.com/ba
 - **Options** (`NS_OPTIONS`) are enum abstracts with `|` and `&`, `None` (no bits) and `has` (all the given bits set: `o.has(WithoutChanges)`).
 - **Packages**: one per framework; Core Graphics' types (`CGRect`, `CGPoint`, `CGSize`, ...) are in `coregraphics`.
 - **Types**: `id` is `hxmc.objc.Id` (any object: messages to it need a cast or `Std.downcast` first), `id<P>` `P`. `const char *` is `hxmc.unsafe.CString`, other pointers `Ptr`. A block is a Haxe function (`completionHandler:(Null<NSData>, Null<NSURLResponse>, Null<NSError>) -> Void`), a block taking or returning blocks too (`performAsynchronousFileAccessUsingBlock(block:(() -> Void) -> Void)`), `Null<...>` when `_Nullable`.
+- **Objects of C** (Core Foundation's types and those built like them: `CGColorRef`, `CGPathRef`): an extern class implementing `hxmc.objc.Id`, named after its `…Ref` typedef, for each struct the headers bridge to Objective-C (`CF_BRIDGED_TYPE`); a non-`const` typedef of a `const` one's struct is its subclass (`CGMutablePath extends CGPath`). A struct bridged toll-free to a class is that class (`CFStringRef` is `NSString`, `CTFontRef` `NSFont`, `CFMutableArrayRef` `NSMutableArray`); `CFTypeRef` is `Id`.
+- **C functions and variables** of the frameworks in scope are static fields of one class per framework, under their C names (`coregraphics.CoreGraphics.CGColorCreate`, `appkit.AppKit.NSFontAttributeName`): `using coregraphics.CoreGraphics;` makes them methods of their first argument (`ctx.CGContextFillRect(r)`). A function returning an object the caller owns is `@:hxmc.retained`: C's object by Core Foundation's Create rule (`Create` or `Copy` in its name, in a region the headers audit) or `CF_RETURNS_RETAINED`, an Objective-C object by `NS_RETURNS_RETAINED` only (ARC's rule); a function returning C's object outside an audited region is left out. Left out too: functions only in their headers (`static inline`: `CGRectMake`, no symbol), reference counting (`CFRetain`, `CGColorRelease`: the compiler's), variadic ones and those taking blocks. A variable `const` at its top level, or holding an object, is `final`.
 - **Redeclarations**: a class redeclares `alloc` and the initializers it inherits for their result's type; not `self`, `new` or `allocWithZone:`. `retain`, `release` and `autorelease` are left out (memory is the compiler's).
 
 ## License

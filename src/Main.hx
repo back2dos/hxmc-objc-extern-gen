@@ -2,7 +2,7 @@
 // classes for hxmc (its docs/interop.md, "Objective-C"), from clang's AST of
 // `#import <AppKit/AppKit.h>`.
 //
-//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit] [--check]
+//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--check]
 //
 // Without --json/--text it runs clang (twice: the JSON dump for the
 // declarations, the text dump for their availability, which the JSON dump
@@ -22,7 +22,7 @@ class Main {
 	static function main() {
 		var args = Sys.args();
 		var out:Null<String> = null, json:Null<String> = null, text:Null<String> = null, check = false;
-		var scope = ["Foundation", "AppKit"];
+		var scope = ["Foundation", "AppKit", "CoreGraphics", "CoreText", "QuartzCore", "UniformTypeIdentifiers"];
 		var i = 0;
 		while (i < args.length) {
 			switch args[i] {
@@ -35,7 +35,7 @@ class Main {
 			i++;
 		}
 		if (out == null) {
-			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit] [--check]");
+			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--check]");
 			Sys.exit(1);
 		}
 		sys.FileSystem.createDirectory(out);
