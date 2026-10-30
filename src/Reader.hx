@@ -125,6 +125,7 @@ class Reader {
 						}
 					var inst = m.instance == true;
 					var mem = new Member(m.name, !inst, KMethod(ctype(m.returnType), params, m.variadic == true), o);
+					mem.at = m.range != null ? location(m.range.begin) : -1;
 					mem.optional = m.control == "optional";
 					mem.designated = designated;
 					mem.avail = avail.get(key + "|" + (inst ? "-" : "+") + m.name);
@@ -195,7 +196,27 @@ class Reader {
 			if (c.protocols.indexOf(p) < 0) c.protocols.push(p);
 		var a = avail.get("P:" + name);
 		if (a != null) c.avail = Avail.merge(c.avail, a);
+		var begin = n.range != null ? location(n.range.begin) : -1, f = file;
+		var before = c.members.length;
 		members(n, c, o, "P:" + name);
+		optionals(f, begin, c.members.slice(before));
+	}
+
+	// which methods of a protocol are @optional: the dumps say it of
+	// properties only, so the last of @optional and @required before each
+	// method in the protocol's source (read here, never written out)
+	var sources = new Map<String, Null<String>>();
+
+	function optionals(f:String, begin:Int, ms:Array<Member>) {
+		if (begin < 0 || f == "") return;
+		if (!sources.exists(f)) sources.set(f, try sys.io.File.getContent(f) catch (_:Dynamic) null);
+		var src = sources.get(f);
+		if (src == null) return;
+		for (m in ms) {
+			if (!m.kind.match(KMethod(_, _, _)) || m.at <= begin || m.at > src.length) continue;
+			var head = src.substring(begin, m.at);
+			m.optional = head.lastIndexOf("@optional") > head.lastIndexOf("@required");
+		}
 	}
 
 	// the value of an enumerator's initializer: a ConstantExpr's

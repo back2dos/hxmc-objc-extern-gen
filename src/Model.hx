@@ -54,6 +54,7 @@ class Member {
 	public var avail:Null<Availability>;
 	public var origin:Origin; // of the container declaring it (a category's)
 	public var designated:Bool = false;
+	public var at:Int = -1; // the offset of its declaration in its file (a protocol's: @optional)
 
 	public function new(name, isStatic, kind, origin) {
 		this.name = name;

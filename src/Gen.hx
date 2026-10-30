@@ -20,8 +20,16 @@ typedef FieldRec = {
 	isOverload:Bool // one of several methods of its name
 }
 
+// a protocol's members as its interface declares them (those of the
+// protocols it extends first): names unique in the whole family, no overloads
+// (a Haxe class implementing it declares none), optional ones @:optional
+typedef ProtoMethod = {rec:FieldRec, optional:Bool, owner:String};
+typedef ProtoProp = {name:String, objcName:String, h:HType, readonly:Bool, get:FieldRec, set:Null<FieldRec>, optional:Bool, owner:String};
+typedef ProtoInfo = {methods:Array<ProtoMethod>, props:Array<ProtoProp>, names:Map<String, Bool>, sels:Map<String, Bool>};
+
 // what a class sees of itself and its superclasses
 class ClassState {
+	public var adopted = new Map<String, Bool>(); // the protocols implemented, inherited too
 	public var names = new Map<String, FieldRec>(); // instance fields, inherited too
 	public var sels = new Map<String, FieldRec>(); // instance selectors, inherited too
 	public var props = new Map<String, {readonly:Bool, setter:String}>(); // instance properties, inherited too
@@ -34,6 +42,7 @@ class ClassState {
 
 	public function inherit():ClassState {
 		var s = new ClassState();
+		s.adopted = adopted.copy();
 		s.names = names.copy();
 		s.sels = sels.copy();
 		s.props = props.copy();
@@ -82,15 +91,19 @@ class Gen {
 	var classes = new Map<String, Container>();
 	var adopted = new Map<String, Array<{proto:String, origin:Origin}>>();
 	var enumByName = new Map<String, EnumInfo>();
+	// the protocols of the SDK
+	var protos = new Map<String, Container>();
 
 	// what is generated
 	public var included = new Map<String, Bool>();
+	public var protosIncluded = new Map<String, Bool>();
 	var structsUsed = new Map<String, RecordInfo>();
 	var enumsUsed = new Map<String, EnumInfo>();
 	var structOk = new Map<String, Null<String>>(); // record id -> why it cannot be passed (null: it can)
 
 	// what the type being mapped references (committed when its member is kept)
 	var refs:Array<String> = [];
+	var protoRefs:Array<String> = [];
 	var structRefs:Array<RecordInfo> = [];
 	var enumRefs:Array<EnumInfo> = [];
 
@@ -128,6 +141,8 @@ class Gen {
 			classes.set(name, c);
 			adopted.set(name, [for (p in c.protocols) {proto: p, origin: c.origin}]);
 		}
+		for (name => p in r.protocols)
+			if (!unavailable(p.avail) && p.origin != null) protos.set(name, p);
 		// a class whose superclass is missing is too
 		var changed = true;
 		while (changed) {
@@ -218,6 +233,15 @@ class Gen {
 		return HClass(name, nullable);
 	}
 
+	// id<P> (the first protocol of the list generated, NSObject's last)
+	public function useProtocol(names:Array<String>, nullable:Bool):Null<HType> {
+		var ps = [for (n in names) if (protos.exists(n)) n];
+		ps.sort((a, b) -> (a == "NSObject" ? 1 : 0) - (b == "NSObject" ? 1 : 0));
+		if (ps.length == 0) return null;
+		protoRefs.push(ps[0]);
+		return HProto(ps[0], nullable);
+	}
+
 	public function useEnum(e:EnumInfo):HType {
 		if (e.name == null) return enumUnderlying(e);
 		enumRefs.push(e);
@@ -283,6 +307,7 @@ class Gen {
 	// the type of a declaration's member, its references committed if it maps
 	function attempt<T>(f:() -> T):T {
 		refs = [];
+		protoRefs = [];
 		structRefs = [];
 		enumRefs = [];
 		return f();
@@ -291,6 +316,8 @@ class Gen {
 	function commit() {
 		for (n in refs)
 			include(n);
+		for (p in protoRefs)
+			includeProto(p);
 		for (s in structRefs)
 			useStructDeep(s);
 		for (e in enumRefs)
@@ -312,6 +339,13 @@ class Gen {
 			useStructDeep(s);
 		for (e in es)
 			if (e.name != null) enumsUsed.set(e.name, e);
+	}
+
+	function includeProto(name:String) {
+		if (protosIncluded.exists(name) || !protos.exists(name)) return;
+		protosIncluded.set(name, false);
+		for (q in protos.get(name).protocols)
+			includeProto(q);
 	}
 
 	function include(name:String) {
@@ -364,14 +398,38 @@ class Gen {
 	public function closure() {
 		for (name => c in classes)
 			if (scope.indexOf(c.origin.framework) >= 0) include(name);
+		for (name => p in protos)
+			if (scope.indexOf(p.origin.framework) >= 0) includeProto(name);
 		var done = new Map<String, Bool>();
 		var progress = true;
 		while (progress) {
 			progress = false;
+			for (name in [for (k in protosIncluded.keys()) k]) {
+				if (done.exists("P:" + name)) continue;
+				done.set("P:" + name, true);
+				progress = true;
+				for (m in protos.get(name).members) {
+					if (unavailable(m.avail) || m.isStatic) continue;
+					try {
+						attempt(() -> switch m.kind {
+							case KMethod(ret, params, variadic):
+								if (variadic) throw new Skip("variadic");
+								types.map(ret, "NSObject");
+								for (p in params)
+									types.map(p.type, "NSObject");
+							case KProperty(t, _, _, _):
+								types.map(t, "NSObject");
+						});
+						commit();
+					} catch (_:Skip) {}
+				}
+			}
 			for (name in [for (k in included.keys()) k]) {
 				if (done.exists(name)) continue;
 				done.set(name, true);
 				progress = true;
+				for (a in adopted.get(name))
+					includeProto(a.proto);
 				for (m in membersOf(name)) {
 					if (unavailable(m.avail) || m.optional) continue;
 					try {
@@ -420,6 +478,7 @@ class Gen {
 			case HPrim(pack, name): pack.concat([name]).join(".");
 			case HVoid: "Void";
 			case HClass(name, _): name;
+			case HProto(name, _): "P:" + name;
 			case HStruct(rec): rec.name;
 			case HEnum(e): e.name;
 		}
@@ -478,6 +537,9 @@ class Gen {
 			case HClass(name, nullable):
 				var c = path([packOf(classes.get(name).origin)], name);
 				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+			case HProto(name, nullable):
+				var c = path([packOf(protos.get(name).origin)], protoName(name));
+				nullable ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
 			case HStruct(rec): path([typePack(rec.name, rec.origin)], typeName(rec.name));
 			case HEnum(e): path([typePack(e.name, e.origin)], typeName(e.name));
 		}
@@ -530,6 +592,264 @@ class Gen {
 			pos: POS,
 			kind: FFun({args: [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}], ret: ctype(ret, mod), expr: null})
 		};
+	}
+
+	// --- protocols ---
+
+	// a protocol's Haxe name: its own, or with "Protocol" when a class has it
+	// (NSObject's, as Swift names it)
+	public function protoName(name:String):String
+		return classes.exists(name) || r.classes.exists(name) ? name + "Protocol" : name;
+
+	var protoInfos = new Map<String, ProtoInfo>();
+
+	function protoInfo(name:String):ProtoInfo {
+		var info = protoInfos.get(name);
+		if (info != null) return info;
+		info = {methods: [], props: [], names: new Map(), sels: new Map()};
+		protoInfos.set(name, info);
+		var p = protos.get(name);
+		for (q in p.protocols) {
+			if (!protos.exists(q)) continue;
+			var qi = protoInfo(q);
+			for (m in qi.methods)
+				if (!info.sels.exists(m.rec.sel)) {
+					info.methods.push(m);
+					info.sels.set(m.rec.sel, true);
+					info.names.set(m.rec.name, true);
+				}
+			for (pp in qi.props)
+				if (!info.sels.exists("@" + pp.objcName)) {
+					info.props.push(pp);
+					info.sels.set("@" + pp.objcName, true);
+					info.sels.set(pp.get.sel, true);
+					if (pp.set != null) info.sels.set(pp.set.sel, true);
+					for (n in [pp.name, pp.get.name, "set_" + pp.name])
+						info.names.set(n, true);
+				}
+		}
+		var live = [];
+		for (m in p.members) {
+			where = name + " (protocol) " + (m.isStatic ? "+" : "-") + m.name;
+			if (unavailable(m.avail)) continue;
+			if (m.isStatic) {
+				skip("class member of a protocol");
+				continue;
+			}
+			if (m.kind.match(KMethod(_, _, _)) && MEMORY.indexOf(m.name) >= 0) {
+				skip("memory management (the compiler's)");
+				continue;
+			}
+			live.push(m);
+		}
+		// properties first, then methods (their first pieces: the name when no
+		// other method of the family has it, else all pieces joined)
+		for (m in live)
+			switch m.kind {
+				case KProperty(t, ro, getter, setter):
+					where = name + " (protocol) " + m.name;
+					if (info.sels.exists("@" + m.name)) continue;
+					var h = try attempt(() -> types.map(t, "NSObject")) catch (s:Skip) {
+						skip(s.reason, s.what);
+						continue;
+					}
+					if (h == HVoid) continue;
+					commit();
+					var pname = ident(m.name);
+					while (info.names.exists(pname) || info.names.exists("get_" + pname))
+						pname += "_";
+					var getSel = getter != null ? getter : m.name;
+					var setSel = setter != null ? setter : "set" + m.name.charAt(0).toUpperCase() + m.name.substr(1) + ":";
+					var depr = m.avail != null ? m.avail.deprecated : null;
+					var getF:FieldRec = {
+						name: "get_" + pname, sel: getSel, isStatic: false, params: [], ret: h, selMeta: pname != m.name || getSel != m.name, lib: null,
+						deprecated: depr, instancetype: false, accessor: true, isOverload: false
+					};
+					var setF:Null<FieldRec> = ro ? null : {
+						name: "set_" + pname, sel: setSel, isStatic: false, params: [{name: "v", t: h}], ret: h, selMeta: pname != m.name || setter != null,
+						lib: null, deprecated: depr, instancetype: false, accessor: true, isOverload: false
+					};
+					info.props.push({name: pname, objcName: m.name, h: h, readonly: ro, get: getF, set: setF, optional: m.optional, owner: name});
+					info.sels.set("@" + m.name, true);
+					info.sels.set(getSel, true);
+					if (setF != null) info.sels.set(setSel, true);
+					for (n in [pname, getF.name, "set_" + pname])
+						info.names.set(n, true);
+					tally(count, "protocol properties");
+				case _:
+			}
+		var firsts = new Map<String, Int>();
+		for (m in info.methods)
+			firsts.set(pieces(m.rec.sel)[0], (firsts.exists(pieces(m.rec.sel)[0]) ? firsts.get(pieces(m.rec.sel)[0]) : 0) + 1);
+		for (m in live)
+			switch m.kind {
+				case KMethod(_, _, _) if (!info.sels.exists(m.name)):
+					var f = pieces(m.name)[0];
+					firsts.set(f, (firsts.exists(f) ? firsts.get(f) : 0) + 1);
+				case _:
+			}
+		for (m in live)
+			switch m.kind {
+				case KMethod(retT, params, variadic):
+					where = name + " (protocol) -" + m.name;
+					var sel = m.name;
+					if (info.sels.exists(sel)) continue;
+					if (variadic) {
+						skip("variadic");
+						continue;
+					}
+					var sig = try attempt(() -> {
+						ret: types.map(retT, "NSObject"),
+						params: [for (p in params) types.map(p.type, "NSObject")]
+					}) catch (s:Skip) {
+						skip(s.reason, s.what);
+						continue;
+					}
+					commit();
+					// (a selector of one piece keeps it; those of several sharing it are joined)
+					var first = pieces(sel)[0], one = pieces(sel).length == 1;
+					var n = naming(sel, params, s -> info.names.exists(s) || s == first && !one && firsts.get(first) > 1);
+					var rec:FieldRec = {
+						name: n.name, sel: sel, isStatic: false, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
+						ret: sig.ret, selMeta: n.selMeta, lib: null, deprecated: m.avail != null ? m.avail.deprecated : null,
+						instancetype: Types.isInstancetype(retT), accessor: false, isOverload: false
+					};
+					info.methods.push({rec: rec, optional: m.optional, owner: name});
+					info.sels.set(sel, true);
+					info.names.set(rec.name, true);
+					tally(count, "protocol methods");
+				case _:
+			}
+		return info;
+	}
+
+	public function protoDef(name:String, mod:Module):TypeDefinition {
+		var p = protos.get(name);
+		var info = protoInfo(name);
+		where = name + " (protocol)";
+		var fields:Array<Field> = [];
+		function optional(f:Field, o:Bool):Field {
+			if (o) f.meta.push(meta(":optional"));
+			return f;
+		}
+		for (pp in info.props) {
+			if (pp.owner != name) continue;
+			fields.push(optional({
+				name: pp.name,
+				access: [],
+				meta: [],
+				pos: POS,
+				kind: FProp("get", pp.readonly ? "never" : "set", ctype(pp.h, mod))
+			}, pp.optional));
+			fields.push(optional(methodField(pp.get, pp.h, false, mod), pp.optional));
+			if (pp.set != null) fields.push(optional(methodField(pp.set, pp.h, false, mod), pp.optional));
+		}
+		for (m in info.methods)
+			if (m.owner == name) fields.push(optional(methodField(m.rec, m.rec.ret, false, mod), m.optional));
+		var parents = [];
+		for (q in p.protocols)
+			if (protos.exists(q) && protosIncluded.exists(q)) {
+				mod.use([packOf(protos.get(q).origin)], protoName(q));
+				parents.push({pack: [], name: protoName(q)});
+			}
+		var m = [meta(":hxmc.objc", [str(name)])];
+		if (p.avail != null && p.avail.deprecated != null) m.push(deprecatedMeta(p.avail.deprecated));
+		tally(count, "protocols");
+		return {
+			pack: [packOf(p.origin)],
+			name: protoName(name),
+			pos: POS,
+			meta: m,
+			params: [],
+			isExtern: true,
+			kind: TDClass(null, parents, true, false, false),
+			fields: fields
+		};
+	}
+
+	// the protocols class `name` adopts that its declaration can implement:
+	// each member of the protocol's family under its name in the protocol (a
+	// method the class names otherwise gets a field of that name too, sending
+	// the same selector; an optional one it lacks, none: the interface's);
+	// a protocol whose names the class gives other members is left out
+	function adoptions(name:String, st:ClassState, mod:Module, fields:Array<Field>):Array<TypePath> {
+		var r = [];
+		for (a in adopted.get(name)) {
+			var p = a.proto;
+			if (!protosIncluded.exists(p) || st.adopted.exists(p)) continue;
+			var info = protoInfo(p);
+			where = name + " <" + p + ">";
+			var add:Array<FieldRec> = [], addProps:Array<ProtoProp> = [];
+			var taken = new Map<String, Bool>();
+			function free(n:String)
+				return !st.names.exists(n) && !taken.exists(n);
+			var why:Null<String> = null;
+			for (pm in info.methods) {
+				// (a protocol a superclass implements: its members are there)
+				if (st.adopted.exists(pm.owner)) continue;
+				var rec = pm.rec;
+				var mine = st.sels.get(rec.sel), named = st.names.get(rec.name);
+				if (mine != null && mine.name == rec.name && !mine.accessor) continue;
+				if (named != null && named.sel == rec.sel && !named.accessor) continue;
+				if (!free(rec.name)) {
+					why = rec.sel + " is " + rec.name + " in the protocol, another member's name here";
+					break;
+				}
+				if (pm.optional && mine == null) continue;
+				add.push(rec);
+				taken.set(rec.name, true);
+			}
+			if (why == null)
+				for (pp in info.props) {
+					if (st.adopted.exists(pp.owner)) continue;
+					var mine = st.props.get(pp.objcName);
+					if (mine != null) {
+						var g = st.names.get(pp.name);
+						if (g == null || g.sel != pp.get.sel || !g.accessor) why = "property " + pp.objcName + " is named otherwise here";
+						else if (!pp.readonly && mine.readonly) why = "property " + pp.objcName + " is readonly here";
+						if (why != null) break;
+						continue;
+					}
+					if (!free(pp.name) || !free(pp.get.name) || !free("set_" + pp.name)) {
+						why = "property " + pp.objcName + ": its names are other members' here";
+						break;
+					}
+					if (pp.optional) continue;
+					addProps.push(pp);
+					for (n in [pp.name, pp.get.name, "set_" + pp.name])
+						taken.set(n, true);
+				}
+			if (why != null) {
+				skip("protocol not implemented (names)", why);
+				continue;
+			}
+			for (rec in add) {
+				fields.push(methodField(rec, rec.ret, false, mod));
+				st.names.set(rec.name, rec);
+				if (!st.sels.exists(rec.sel)) st.sels.set(rec.sel, rec);
+				tally(count, "protocol members redeclared under the protocol's names");
+			}
+			for (pp in addProps) {
+				fields.push({name: pp.name, access: [], meta: [], pos: POS, kind: FProp("get", pp.readonly ? "never" : "set", ctype(pp.h, mod))});
+				fields.push(methodField(pp.get, pp.h, false, mod));
+				if (pp.set != null) fields.push(methodField(pp.set, pp.h, false, mod));
+				st.names.set(pp.name, pp.get);
+				st.names.set(pp.get.name, pp.get);
+				if (pp.set != null) st.names.set(pp.set.name, pp.set);
+				st.props.set(pp.objcName, {readonly: pp.readonly, setter: pp.set != null ? pp.set.sel : null});
+				tally(count, "protocol members redeclared under the protocol's names");
+			}
+			function mark(q:String) {
+				st.adopted.set(q, true);
+				for (x in protos.get(q).protocols)
+					if (protos.exists(x)) mark(x);
+			}
+			mark(p);
+			mod.use([packOf(protos.get(p).origin)], protoName(p));
+			r.push({pack: [], name: protoName(p)});
+			tally(count, "protocols adopted");
+		}
+		return r;
 	}
 
 	// --- classes ---
@@ -832,6 +1152,7 @@ class Gen {
 			tally(count, "redeclared instancetype methods (override)");
 		}
 
+		var impl = adoptions(name, st, mod, tail);
 		var cm = [libMeta(c.origin), meta(":hxmc.objc")];
 		if (c.avail != null && c.avail.deprecated != null) cm.push(deprecatedMeta(c.avail.deprecated));
 		var sup = c.superName != null ? {
@@ -845,7 +1166,7 @@ class Gen {
 			meta: cm,
 			params: [],
 			isExtern: true,
-			kind: TDClass(sup, [], false, false, false),
+			kind: TDClass(sup, impl, false, false, false),
 			fields: head.concat(fields).concat(tail)
 		};
 	}
@@ -1136,6 +1457,18 @@ class Gen {
 			names.set(name, true);
 			tally(count, "classes");
 			emit(td, mod);
+		}
+		var ps = [for (k in protosIncluded.keys()) k];
+		ps.sort(Reflect.compare);
+		for (p in ps) {
+			var mod = new Module(packOf(protos.get(p).origin));
+			var td = protoDef(p, mod);
+			if (names.exists(td.name)) {
+				skip("protocol named like a class");
+				continue;
+			}
+			emit(td, mod);
+			names.set(td.name, true);
 		}
 		var es = [for (k in enumsUsed.keys()) k];
 		es.sort(Reflect.compare);

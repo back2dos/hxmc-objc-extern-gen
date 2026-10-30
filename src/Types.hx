@@ -7,6 +7,7 @@ enum HType {
 	HPrim(pack:Array<String>, name:String); // Int, Float, Bool, hxmc.I64, hxmc.unsafe.Ptr, ...
 	HVoid;
 	HClass(name:String, nullable:Bool);
+	HProto(name:String, nullable:Bool); // id<P>: the protocol's interface
 	HStruct(r:RecordInfo);
 	HEnum(e:EnumInfo);
 }
@@ -162,7 +163,12 @@ class Types {
 		var b = builtin(name);
 		if (b != null) return b;
 		return switch name {
-			case "id": inStruct ? PTR : gen.useClass("NSObject", nullable(t.qual));
+			case "id":
+				if (inStruct) return PTR;
+				// id<P, ...>: the protocol's interface
+				var list = ~/\bid\s*<([^>]*)>/;
+				var h = list.match(d) || list.match(t.qual) ? gen.useProtocol([for (p in list.matched(1).split(",")) p.trim()], nullable(t.qual)) : null;
+				h != null ? h : gen.useClass("NSObject", nullable(t.qual));
 			case "Class": PTR;
 			case "SEL": HPrim(["hxmc", "objc"], "Selector");
 			case "long double": throw new Skip("long double");

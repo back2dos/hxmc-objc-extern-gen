@@ -11,6 +11,20 @@ import hxmc.unsafe.Ptr;
 // Uses of the generated declarations that are lowered and run (macOS):
 //   npm run gen, then with hxmc's Objective-C interop:
 //   haxe -cp smoke -cp out -main Smoke --custom-target hxmc=bin/smoke
+// a delegate implementing two of the protocol's optional methods
+class XmlLog extends NSObject implements NSXMLParserDelegate {
+	public var log:Array<String> = [];
+
+	public function new() {}
+
+	public function parserDidStartElementNamespaceURIQualifiedNameAttributes(parser:NSXMLParser, didStartElement:NSString, namespaceURI:Null<NSString>,
+			qualifiedName:Null<NSString>, attributes:NSDictionary)
+		log.push("<" + didStartElement.UTF8String.toString() + ">");
+
+	public function parserFoundCharacters(parser:NSXMLParser, foundCharacters:NSString)
+		log.push(foundCharacters.UTF8String.toString());
+}
+
 class Smoke {
 	static function ns(s:String):NSString
 		return Arena.scopedValue(a -> NSString.alloc().initWithUTF8String(a.cstring(s)));
@@ -62,5 +76,12 @@ class Smoke {
 		var u = NSMutableString.alloc().initWithString(ns("ab"));
 		u.appendString(ns("cd"));
 		trace("mutable", str(u), str(NSMutableString.stringWithString(ns("x"))));
+		// protocols: a delegate, conformance (NSString adopts NSCopying), id<P>
+		var x = new XmlLog();
+		var parser = NSXMLParser.alloc().initWithData(ns("<a>one<b>two</b></a>").dataUsingEncoding(NSStringConstants.NSUTF8StringEncoding));
+		parser.delegate = x;
+		trace("delegate", parser.parse(), x.log, (x : NSObject).respondsToSelector(Selector.of("parserDidEndDocument:")));
+		var copying:NSCopying = s;
+		trace("conforms", Std.isOfType(copying, NSCopying), Std.isOfType((x : NSObject), NSCopying), Std.isOfType((x : NSObject), NSXMLParserDelegate));
 	}
 }
