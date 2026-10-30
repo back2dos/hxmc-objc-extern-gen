@@ -8,7 +8,7 @@ enum HType {
 	HVoid;
 	HClass(name:String, nullable:Bool, args:Array<HType>); // args: a lightweight generic's (none: its defaults)
 	HParam(name:String, nullable:Bool); // a type parameter of the class (or of a static method, the class's)
-	HId(nullable:Bool); // hxmc.objc.Id, any object: a type argument's or bound's `id`
+	HId(nullable:Bool); // id: hxmc.objc.Id, any object
 	HProto(name:String, nullable:Bool); // id<P>: the protocol's interface
 	HFun(args:Array<HType>, ret:HType, nullable:Bool); // a block: a Haxe function
 	HStruct(r:RecordInfo);
@@ -190,7 +190,6 @@ class Types {
 
 	// a type argument (or a bound): an object type, never null; `id` any object
 	public function typeArg(t:CType, self:String, depth = 0):Null<HType> {
-		if (firstName(t.qual) == "id" && t.qual.indexOf("<") < 0) return HId(false);
 		return switch map(t, self, false, depth) {
 			case HClass(n, _, a): HClass(n, false, a);
 			case HProto(n, _): HProto(n, false);
@@ -285,7 +284,7 @@ class Types {
 				// id<P, ...>: the protocol's interface
 				var list = ~/\bid\s*<([^>]*)>/;
 				var h = list.match(d) || list.match(t.qual) ? gen.useProtocol([for (p in list.matched(1).split(",")) p.trim()], nullable(t.qual)) : null;
-				h != null ? h : gen.useClass("NSObject", nullable(t.qual));
+				h != null ? h : HId(nullable(t.qual));
 			case "Class": PTR;
 			case "SEL": HPrim(["hxmc", "objc"], "Selector");
 			case "long double": throw new Skip("long double");
