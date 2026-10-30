@@ -1320,14 +1320,10 @@ class Gen {
 				kind: FFun({args: [{name: "v", type: uct}], ret: null, expr: {expr: EBinop(OpAssign, id("this"), id("v")), pos: POS}})
 			});
 		if (e.options) {
-			// no options: none of the bits (unless a constant has the name)
+			// no options: none of the bits, a value of its own (so `None` resolves
+			// where the type is expected), unless a constant has the name
 			if (!Lambda.exists(fields, f -> f.name == "None"))
-				fields.push({
-					name: "None",
-					access: [APublic, AStatic, AInline],
-					pos: POS,
-					kind: FVar(null, make(intLiteral(0)))
-				});
+				fields.push({name: "None", access: [], pos: POS, kind: FVar(null, small ? {expr: ECast(intLiteral(0), null), pos: POS} : intLiteral(0))});
 			function op(o:Binop, fname:String):Field {
 				var body = make({expr: EBinop(o, id("this"), under("b")), pos: POS});
 				return {
