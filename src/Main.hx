@@ -2,11 +2,13 @@
 // classes for hxmc (its docs/interop.md, "Objective-C"), from clang's AST of
 // `#import <AppKit/AppKit.h>`.
 //
-//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--check]
+//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]
 //
 // Without --json/--text it runs clang (twice: the JSON dump for the
 // declarations, the text dump for their availability, which the JSON dump
-// does not spell out). --check also writes <out-dir>/ObjcExternsCheck.hx, a
+// does not spell out), into <out-dir>/.clang, deleted after unless
+// --keep-dumps. A framework inside another (HIServices) is read from its
+// outer framework's header. --check also writes <out-dir>/ObjcExternsCheck.hx, a
 // program naming every generated type.
 class Main {
 	static function stamp(what:String, t0:Float):Float {
@@ -19,9 +21,22 @@ class Main {
 		if (Sys.command("/bin/sh", ["-c", cmd]) != 0) throw 'failed: $cmd';
 	}
 
+	// the umbrella header that declares framework `f`: its own, or its outer
+	// framework's for a sub-framework (HIServices: ApplicationServices)
+	static function umbrella(sdk:String, f:String):String {
+		var dir = sdk + "/System/Library/Frameworks";
+		if (!sys.FileSystem.exists('$dir/$f.framework'))
+			for (u in sys.FileSystem.readDirectory(dir))
+				if (sys.FileSystem.exists('$dir/$u/Frameworks/$f.framework')) {
+					var name = haxe.io.Path.withoutExtension(u);
+					return '<$name/$name.h>';
+				}
+		return '<$f/$f.h>';
+	}
+
 	static function main() {
 		var args = Sys.args();
-		var out:Null<String> = null, json:Null<String> = null, text:Null<String> = null, check = false;
+		var out:Null<String> = null, json:Null<String> = null, text:Null<String> = null, check = false, keep = false;
 		var scope = ["Foundation", "AppKit", "CoreGraphics", "CoreText", "QuartzCore", "UniformTypeIdentifiers"];
 		var i = 0;
 		while (i < args.length) {
@@ -30,20 +45,23 @@ class Main {
 				case "--text": text = args[++i];
 				case "--frameworks": scope = args[++i].split(",");
 				case "--check": check = true;
+				case "--keep-dumps": keep = true;
 				case a: out = a;
 			}
 			i++;
 		}
 		if (out == null) {
-			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--check]");
+			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]");
 			Sys.exit(1);
 		}
 		sys.FileSystem.createDirectory(out);
 		var t = haxe.Timer.stamp();
-		if (json == null || text == null) {
-			var tmp = out + "/.clang";
+		var tmp = out + "/.clang", ran = json == null || text == null;
+		if (ran) {
 			sys.FileSystem.createDirectory(tmp);
-			sys.io.File.saveContent(tmp + "/sdk.m", [for (f in scope) '#import <$f/$f.h>\n'].join(""));
+			shell('xcrun --show-sdk-path > $tmp/sdk-path');
+			var sdk = StringTools.trim(sys.io.File.getContent('$tmp/sdk-path'));
+			sys.io.File.saveContent(tmp + "/sdk.m", [for (f in scope) '#import ${umbrella(sdk, f)}\n'].join(""));
 			json = tmp + "/ast.json";
 			text = tmp + "/ast.txt";
 			var cc = "clang -fsyntax-only -x objective-c";
@@ -59,6 +77,11 @@ class Main {
 		var reader = new Reader(avail);
 		reader.read(root);
 		root = null;
+		if (ran && !keep) {
+			for (f in sys.FileSystem.readDirectory(tmp))
+				sys.FileSystem.deleteFile('$tmp/$f');
+			sys.FileSystem.deleteDirectory(tmp);
+		}
 		t = stamp("read", t);
 		var gen = new Gen(reader, scope);
 		gen.prepare();

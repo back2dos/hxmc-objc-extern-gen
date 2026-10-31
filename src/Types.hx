@@ -210,6 +210,8 @@ class Types {
 		if (scope.exists(first) && t.qual.indexOf("*") < 0 && t.qual.indexOf("(^") < 0) return HParam(scope.get(first), nullable(t.qual));
 		// SEL desugars to a pointer to a struct
 		if (t.qual.indexOf("*") < 0 && firstName(t.qual) == "SEL") return HPrim(["hxmc", "objc"], "Selector");
+		// CF's Boolean (an unsigned char holding 0 or 1)
+		if (t.qual.indexOf("*") < 0 && first == "Boolean") return HPrim([], "Bool");
 		// CFTypeRef (`const void *`): any object
 		if (t.qual.indexOf("*") < 0 && first == "CFTypeRef") {
 			if (inStruct) return PTR;
