@@ -80,11 +80,6 @@ class Main {
 		var reader = new Reader(avail);
 		reader.read(root);
 		root = null;
-		if (ran && !keep) {
-			for (f in sys.FileSystem.readDirectory(tmp))
-				sys.FileSystem.deleteFile('$tmp/$f');
-			sys.FileSystem.deleteDirectory(tmp);
-		}
 		t = stamp("read", t);
 		var gen = new Gen(reader, scope);
 		if (macrosFile != null) {
@@ -93,6 +88,11 @@ class Main {
 			ms.addEnums(reader.enums);
 			gen.macros = ms;
 			t = stamp("macros", t);
+		}
+		if (ran && !keep) {
+			for (f in sys.FileSystem.readDirectory(tmp))
+				sys.FileSystem.deleteFile('$tmp/$f');
+			sys.FileSystem.deleteDirectory(tmp);
 		}
 		gen.prepare();
 		gen.closure();
