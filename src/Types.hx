@@ -236,7 +236,9 @@ class Types {
 			if (rec != null) return gen.useStruct(rec);
 			throw new Skip("anonymous type");
 		}
-		if (d.indexOf("(*") >= 0 || d.indexOf("(") >= 0) throw new Skip("function pointer");
+		// a function pointer: an address (hxmc.unsafe.Callback.addr of a @:hxmc.callback function)
+		if (d.indexOf("(*") >= 0) return PTR;
+		if (d.indexOf("(") >= 0) throw new Skip("function type");
 		if (d.indexOf("[") >= 0) throw new Skip("C array");
 		var plain = stripAngles(d);
 		var ws = words(plain);

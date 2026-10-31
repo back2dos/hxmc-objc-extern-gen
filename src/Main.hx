@@ -2,11 +2,11 @@
 // classes for hxmc (its docs/interop.md, "Objective-C"), from clang's AST of
 // `#import <AppKit/AppKit.h>`.
 //
-//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]
+//   objc-extern-gen <out-dir> [--json ast.json --text ast.txt [--macros macros.txt]] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]
 //
 // Without --json/--text it runs clang (twice: the JSON dump for the
 // declarations, the text dump for their availability, which the JSON dump
-// does not spell out), into <out-dir>/.clang, deleted after unless
+// does not spell out; and the preprocessor, for the constant macros), into <out-dir>/.clang, deleted after unless
 // --keep-dumps. A framework inside another (HIServices) is read from its
 // outer framework's header. --check also writes <out-dir>/ObjcExternsCheck.hx, a
 // program naming every generated type.
@@ -36,13 +36,14 @@ class Main {
 
 	static function main() {
 		var args = Sys.args();
-		var out:Null<String> = null, json:Null<String> = null, text:Null<String> = null, check = false, keep = false;
+		var out:Null<String> = null, json:Null<String> = null, text:Null<String> = null, macrosFile:Null<String> = null, check = false, keep = false;
 		var scope = ["Foundation", "AppKit", "CoreGraphics", "CoreText", "QuartzCore", "UniformTypeIdentifiers"];
 		var i = 0;
 		while (i < args.length) {
 			switch args[i] {
 				case "--json": json = args[++i];
 				case "--text": text = args[++i];
+				case "--macros": macrosFile = args[++i];
 				case "--frameworks": scope = args[++i].split(",");
 				case "--check": check = true;
 				case "--keep-dumps": keep = true;
@@ -51,7 +52,7 @@ class Main {
 			i++;
 		}
 		if (out == null) {
-			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]");
+			Sys.println("usage: objc-extern-gen <out-dir> [--json ast.json --text ast.txt [--macros macros.txt]] [--frameworks Foundation,AppKit,...] [--keep-dumps] [--check]");
 			Sys.exit(1);
 		}
 		sys.FileSystem.createDirectory(out);
@@ -67,6 +68,8 @@ class Main {
 			var cc = "clang -fsyntax-only -x objective-c";
 			shell('$cc -Xclang -ast-dump=json $tmp/sdk.m > $json');
 			shell('$cc -Xclang -ast-dump -fno-color-diagnostics $tmp/sdk.m > $text');
+			macrosFile = tmp + "/macros.txt";
+			shell('clang -E -dD -x objective-c $tmp/sdk.m > $macrosFile');
 			t = stamp("clang (json and text dumps)", t);
 		}
 		var avail = new Avail();
@@ -84,6 +87,13 @@ class Main {
 		}
 		t = stamp("read", t);
 		var gen = new Gen(reader, scope);
+		if (macrosFile != null) {
+			var ms = new Macros();
+			ms.read(macrosFile);
+			ms.addEnums(reader.enums);
+			gen.macros = ms;
+			t = stamp("macros", t);
+		}
 		gen.prepare();
 		gen.closure();
 		var modules = gen.write(out);

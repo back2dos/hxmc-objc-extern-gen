@@ -87,6 +87,7 @@ class Gen {
 	var r:Reader;
 	var types:Types;
 	var scope:Array<String>;
+	public var macros:Null<Macros>; // the headers' constant macros (Main: clang -E -dD)
 
 	// the classes of the SDK (categories merged), the protocols each adopts
 	var classes = new Map<String, Container>();
@@ -1886,23 +1887,34 @@ class Gen {
 		};
 	}
 
-	// the constants of a header's anonymous enums, as a class of its own
+	// the constants of a header's anonymous enums and constant macros, as a
+	// class of its own
 	public function constantsDefs(taken:String->Bool):Array<{def:TypeDefinition, mod:Module}> {
 		var byHeader = new Map<String, Array<EnumInfo>>();
+		var macrosOf = new Map<String, Array<Macros.Macro>>();
+		var originOf = new Map<String, Origin>();
 		var order = [];
-		for (e in r.enums) {
-			if (e.name != null || scope.indexOf(e.origin.framework) < 0) continue;
-			var k = packOf(e.origin) + "." + e.origin.header;
-			if (!byHeader.exists(k)) {
+		function key(o:Origin) {
+			var k = packOf(o) + "." + o.header;
+			if (!originOf.exists(k)) {
+				originOf.set(k, o);
 				byHeader.set(k, []);
+				macrosOf.set(k, []);
 				order.push(k);
 			}
-			byHeader.get(k).push(e);
+			return k;
 		}
+		for (e in r.enums) {
+			if (e.name != null || scope.indexOf(e.origin.framework) < 0) continue;
+			byHeader.get(key(e.origin)).push(e);
+		}
+		if (macros != null)
+			for (m in macros.list)
+				if (scope.indexOf(m.origin.framework) >= 0 && m.body != "" && !m.name.startsWith("_")) macrosOf.get(key(m.origin)).push(m);
 		var r = [];
 		for (k in order) {
 			var es = byHeader.get(k);
-			var o = es[0].origin;
+			var o = originOf.get(k);
 			var name = ident(o.header) + "Constants";
 			while (taken(name))
 				name += "_";
@@ -1931,6 +1943,19 @@ class Gen {
 					tally(count, "anonymous enum constants");
 				}
 			}
+			for (m in macrosOf.get(k)) {
+				if (seen.exists(m.name) || !valid(m.name)) continue;
+				var v = macros.value(m.name);
+				if (v == null) {
+					skip("macro: not a constant (attributes, calls, other macros)", m.name);
+					continue;
+				}
+				var f = macroField(m.name, v, mod);
+				if (f == null) continue;
+				seen.set(m.name, true);
+				fields.push(f);
+				tally(count, "constant macros");
+			}
 			if (fields.length == 0) continue;
 			r.push({
 				def: {
@@ -1945,6 +1970,36 @@ class Gen {
 			});
 		}
 		return r;
+	}
+
+	// a constant macro: an Int, I64 or Float constant, or an NSString made once
+	function macroField(name:String, v:Macros.MacroValue, mod:Module):Null<Field> {
+		inline function field(access, t:ComplexType, e:Expr):Field
+			return {name: name, access: [APublic, AStatic].concat(access), pos: POS, kind: FVar(t, e)};
+		return switch v {
+			case MInt(x) if (fits32(x)):
+				field([AInline], ctype(Types.INT, mod), intLiteral(x.low));
+			case MInt(x):
+				field([AFinal], ctype(Types.I64, mod), {expr: ECast(int(hex(x), "i64"), null), pos: POS});
+			case MFloat(x) if (Math.isFinite(x)):
+				var s = Std.string(x);
+				if (s.indexOf(".") < 0 && s.indexOf("e") < 0) s += ".0";
+				field([AInline], TPath({pack: [], name: "Float"}), {expr: EConst(CFloat(s)), pos: POS});
+			case MFloat(_):
+				skip("macro: not a finite number", name);
+				null;
+			case MString(s):
+				if (!classes.exists("NSString")) {
+					skip("macro: an NSString without Foundation", name);
+					null;
+				} else {
+					var fn = {expr: EConst(CIdent("hxmc")), pos: POS};
+					for (n in ["objc", "Strings", "toNSString"])
+						fn = {expr: EField(fn, n), pos: POS};
+					var call = {expr: ECall(fn, [str(s)]), pos: POS};
+					field([AFinal], ctype(HClass("NSString", false, []), mod), {expr: ECast(call, null), pos: POS});
+				}
+		}
 	}
 
 	// --- structs ---
