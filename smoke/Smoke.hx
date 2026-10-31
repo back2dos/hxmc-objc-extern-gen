@@ -147,6 +147,9 @@ class Smoke {
 		trace("font", font.CTFontGetSize(), font.CTFontCopyFamilyName().UTF8String.toString(), font.pointSize);
 		trace("constants", AppKit.NSFontAttributeName.UTF8String.toString(),
 			Foundation.NSStringFromRect(new CGRect(new CGPoint(1, 2), new CGSize(3, 4))).UTF8String.toString());
+		// a nil-terminated variadic message (`...rest`)
+		var listed = NSArray.arrayWithObjects(ns("x"), ns("y"), ns("z"));
+		trace("variadic", listed.count, str(listed.componentsJoinedByString(ns("+"))));
 		// class methods: a Haxe class's static AppKit sends (ObjCClass: the class itself)
 		var pb = NSPasteboard.pasteboardWithUniqueName();
 		pb.clearContents();

@@ -17,7 +17,8 @@ typedef FieldRec = {
 	deprecated:Null<String>,
 	instancetype:Bool,
 	accessor:Bool,
-	isOverload:Bool // one of several methods of its name
+	isOverload:Bool, // one of several methods of its name
+	?rest:HType // a nil-terminated variadic method's `...rest` (its first named parameter's type)
 }
 
 // a protocol's members as its interface declares them (those of the
@@ -952,14 +953,36 @@ class Gen {
 		}
 		if (isOverride) access.push(AOverride);
 		if (f.isOverload) access.push(AOverload);
+		var args:Array<FunctionArg> = [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}];
+		// (NS_REQUIRES_NIL_TERMINATION: `...rest`, nil appended by hxmc)
+		if (f.rest != null) {
+			m.push(meta(":hxmc.nilTerminated"));
+			args.push({name: "rest", type: TPath({pack: ["haxe"], name: "Rest", params: [TPType(ctype(f.rest, mod))]})});
+		}
 		return {
 			name: f.name,
 			access: access,
 			meta: m,
 			pos: POS,
-			kind: FFun({args: [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}], ret: ctype(ret, mod), expr: null, params: tps})
+			kind: FFun({args: args, ret: ctype(ret, mod), expr: null, params: tps})
 		};
 	}
+
+	// nil-terminated variadic methods whose lists are not of objects (colors
+	// and CGFloat locations in turn)
+	static var MIXED_LISTS = ["initWithColorsAndLocations:"];
+
+	// a variadic list's element type: its first named parameter's, an object
+	// (never null in the list), else null
+	static function restOf(first:HType):Null<HType>
+		return switch first {
+			case HClass(n, _, a): HClass(n, false, a);
+			case HCF(n, _): HCF(n, false);
+			case HId(_): HId(false);
+			case HProto(n, _): HProto(n, false);
+			case HParam(n, _): HParam(n, false);
+			case _: null;
+		}
 
 	// the bounds of the type parameters of the class being written
 	var bounds = new Map<String, HType>();
@@ -1466,7 +1489,7 @@ class Gen {
 		var seenCandidates = new Map<String, Bool>();
 		for (m in live)
 			switch m.kind {
-				case KMethod(_, _, false) if (!seenCandidates.exists(key(m))):
+				case KMethod(_, _, v) if ((!v || m.sentinel) && !seenCandidates.exists(key(m))):
 					seenCandidates.set(key(m), true);
 					candidates.push(m);
 				case _:
@@ -1480,7 +1503,7 @@ class Gen {
 			if (!m.isStatic && ps.length >= 2 && descendantClaims(name, ps[0], m.name)) continue;
 			within(m, name);
 			var sig = try attempt(() -> switch m.kind {
-				case KMethod(_, params, _): [for (p in params) sigKey(types.map(p.type, self))].join(",");
+				case KMethod(_, params, v): [for (p in params) sigKey(types.map(p.type, self))].join(",") + (v ? ",..." : "");
 				case _: throw "unreachable";
 			}) catch (_:Skip) continue;
 			var gk = (m.isStatic ? "+" : "-") + ps[0];
@@ -1504,8 +1527,10 @@ class Gen {
 					var k = key(m);
 					if (seenMethods.exists(k)) continue;
 					seenMethods.set(k, true);
-					if (variadic) {
-						skip("variadic");
+					// (a nil-terminated list of objects: `...rest`; others, a format's
+					// arguments of any type or mixed lists, are left out)
+					if (variadic && (!m.sentinel || params.length == 0 || MIXED_LISTS.indexOf(m.name) >= 0)) {
+						skip(m.sentinel ? "variadic of mixed types" : "variadic (a format's arguments: format in Haxe)");
 						continue;
 					}
 					var sel = m.name;
@@ -1519,6 +1544,11 @@ class Gen {
 						continue;
 					}
 					var depr = m.avail != null ? m.avail.deprecated : null;
+					var rest = variadic ? restOf(sig.params[0]) : null;
+					if (variadic && rest == null) {
+						skip("variadic of mixed types");
+						continue;
+					}
 					if (m.isStatic) {
 						if (st.staticSels.exists(sel)) {
 							skip(st.staticSels.get(sel).accessor ? "method covered by a property" : "duplicate");
@@ -1536,7 +1566,7 @@ class Gen {
 							var n = naming(sel, params, s -> st.staticNames.exists(s) || claimed(true, s, sel), o);
 							f = {
 								name: n.name, sel: sel, isStatic: true, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
-								ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o
+								ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o, rest: rest
 							};
 						}
 						commit();
@@ -1584,7 +1614,7 @@ class Gen {
 						var n = naming(sel, params, s -> st.names.exists(s) || claimed(false, s, sel) || multi && descendantClaims(name, s, sel), o);
 						var f:FieldRec = {
 							name: n.name, sel: sel, isStatic: false, params: [for (i in 0...params.length) {name: n.params[i], t: sig.params[i]}],
-							ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o
+							ret: sig.ret, selMeta: n.selMeta, lib: libOf(m), deprecated: depr, instancetype: isIt, accessor: false, isOverload: o, rest: rest
 						};
 						commit();
 						fields.push(methodField(f, f.ret, false, mod));

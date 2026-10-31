@@ -57,6 +57,7 @@ class Member {
 	public var avail:Null<Availability>;
 	public var origin:Origin; // of the container declaring it (a category's)
 	public var designated:Bool = false;
+	public var sentinel:Bool = false; // a variadic method's NS_REQUIRES_NIL_TERMINATION
 	public var at:Int = -1; // the offset of its declaration in its file (a protocol's: @optional)
 	public var scope:Array<String> = []; // the type parameters' names where it is declared (a category's own)
 

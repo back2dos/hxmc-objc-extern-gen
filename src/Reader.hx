@@ -125,13 +125,14 @@ class Reader {
 			switch (m.kind : String) {
 				case "ObjCMethodDecl" if (m.isImplicit != true):
 					var params:Array<Param> = [];
-					var designated = false;
+					var designated = false, sentinel = false;
 					var ps:Array<Dynamic> = m.inner;
 					if (ps != null)
 						for (p in ps) {
 							locate(p);
 							if (p.kind == "ParmVarDecl") params.push({name: p.name, type: ctype(p.type)});
 							if (p.kind == "ObjCDesignatedInitializerAttr") designated = true;
+							if (p.kind == "SentinelAttr") sentinel = true;
 							walkChildren(p);
 						}
 					var inst = m.instance == true;
@@ -140,6 +141,7 @@ class Reader {
 					mem.optional = m.control == "optional";
 					mem.scope = scope;
 					mem.designated = designated;
+					mem.sentinel = sentinel;
 					mem.avail = avail.get(key + "|" + (inst ? "-" : "+") + m.name);
 					c.members.push(mem);
 				case "ObjCPropertyDecl":
