@@ -605,6 +605,19 @@ class Gen {
 			case _: ctype(h, mod);
 		}
 
+	// a parameter's or property's type: an NSString or NSNumber also from Haxe's
+	// String, Int, Float or Bool (NSStringArg, NSNumberArg; results stay as they are)
+	function argType(h:HType, mod:Module):ComplexType {
+		var arg = switch h {
+			case HClass(n = "NSString" | "NSNumber", _, _) if (classes.exists(n) && packOf(classes.get(n).origin) == "foundation"): n + "Arg";
+			case _: null;
+		}
+		if (arg == null) return ctype(h, mod);
+		mod.use(["foundation"], arg);
+		var c = TPath({pack: [], name: arg});
+		return h.match(HClass(_, true, _)) ? TPath({pack: [], name: "Null", params: [TPType(c)]}) : c;
+	}
+
 	// the C functions of the frameworks in scope: those with a symbol whose
 	// types map; an object result's ownership by Core Foundation's rules for
 	// C's objects (an audited region's Create rule, CF_RETURNS_RETAINED), by
@@ -733,7 +746,7 @@ class Gen {
 				while (pnames.indexOf(n) >= 0)
 					n += "_";
 				pnames.push(n);
-				args.push({name: n, type: cParamType(p.t, g.mod)});
+				args.push({name: n, type: p.t.match(HFun(_, _, _)) ? cParamType(p.t, g.mod) : argType(p.t, g.mod)});
 			}
 			g.fields.push({
 				name: ident(k.f.name),
@@ -954,7 +967,7 @@ class Gen {
 		}
 		if (isOverride) access.push(AOverride);
 		if (f.isOverload) access.push(AOverload);
-		var args:Array<FunctionArg> = [for (p in f.params) {name: p.name, type: ctype(p.t, mod)}];
+		var args:Array<FunctionArg> = [for (p in f.params) {name: p.name, type: argType(p.t, mod)}];
 		// (NS_REQUIRES_NIL_TERMINATION: `...rest`, nil appended by hxmc)
 		if (f.rest != null) {
 			m.push(meta(":hxmc.nilTerminated"));
@@ -965,7 +978,7 @@ class Gen {
 			access: access,
 			meta: m,
 			pos: POS,
-			kind: FFun({args: args, ret: ctype(ret, mod), expr: null, params: tps})
+			kind: FFun({args: args, ret: f.accessor ? argType(ret, mod) : ctype(ret, mod), expr: null, params: tps})
 		};
 	}
 
@@ -1141,7 +1154,7 @@ class Gen {
 					while (names.exists(pname) || names.exists("get_" + pname))
 						pname += "_";
 					var getSel = getter != null ? getter : m.name;
-					fields.push({name: pname, access: [AStatic], meta: [], pos: POS, kind: FProp("get", "never", ctype(h, mod))});
+					fields.push({name: pname, access: [AStatic], meta: [], pos: POS, kind: FProp("get", "never", argType(h, mod))});
 					fields.push(methodField({
 						name: "get_" + pname, sel: getSel, isStatic: true, params: [], ret: h, selMeta: pname != m.name || getSel != m.name, lib: null,
 						deprecated: depr, instancetype: false, accessor: true, isOverload: false
@@ -1189,7 +1202,7 @@ class Gen {
 				access: [],
 				meta: [],
 				pos: POS,
-				kind: FProp("get", pp.readonly ? "never" : "set", ctype(pp.h, mod))
+				kind: FProp("get", pp.readonly ? "never" : "set", argType(pp.h, mod))
 			}, pp.optional));
 			fields.push(optional(methodField(pp.get, pp.h, false, mod), pp.optional));
 			if (pp.set != null) fields.push(optional(methodField(pp.set, pp.h, false, mod), pp.optional));
@@ -1283,7 +1296,7 @@ class Gen {
 				tally(count, "protocol members redeclared under the protocol's names");
 			}
 			for (pp in addProps) {
-				fields.push({name: pp.name, access: [], meta: [], pos: POS, kind: FProp("get", pp.readonly ? "never" : "set", ctype(pp.h, mod))});
+				fields.push({name: pp.name, access: [], meta: [], pos: POS, kind: FProp("get", pp.readonly ? "never" : "set", argType(pp.h, mod))});
 				fields.push(methodField(pp.get, pp.h, false, mod));
 				if (pp.set != null) fields.push(methodField(pp.set, pp.h, false, mod));
 				st.names.set(pp.name, pp.get);
@@ -1463,7 +1476,7 @@ class Gen {
 						access: m.isStatic ? [AStatic] : [],
 						meta: vm,
 						pos: POS,
-						kind: FProp("get", readonly ? "never" : "set", ctype(h, mod))
+						kind: FProp("get", readonly ? "never" : "set", argType(h, mod))
 					});
 					fields.push(methodField(getF, h, false, mod));
 					if (!readonly) fields.push(methodField(setF, h, false, mod));
@@ -2039,6 +2052,24 @@ class Gen {
 
 	// --- output ---
 
+	static final ARG_ABSTRACTS = [
+		"NSStringArg" => "// where an NSString is passed: one, or a Haxe String (an autoreleased copy:\n"
+			+ "// Cocoa copies the strings it keeps)\n"
+			+ "@:forward abstract NSStringArg(NSString) from NSString to NSString {\n"
+			+ "\t@:from static inline function ofString(s:String):NSStringArg\n"
+			+ "\t\treturn cast hxmc.objc.Strings.toNSString(s);\n"
+			+ "}\n",
+		"NSNumberArg" => "// where an NSNumber is passed: one, or a Haxe Int, Float or Bool\n"
+			+ "@:forward abstract NSNumberArg(NSNumber) from NSNumber to NSNumber {\n"
+			+ "\t@:from static inline function ofInt(v:Int):NSNumberArg\n"
+			+ "\t\treturn NSNumber.numberWithInt(v);\n\n"
+			+ "\t@:from static inline function ofFloat(v:Float):NSNumberArg\n"
+			+ "\t\treturn NSNumber.numberWithDouble(v);\n\n"
+			+ "\t@:from static inline function ofBool(v:Bool):NSNumberArg\n"
+			+ "\t\treturn NSNumber.numberWithBool(v);\n"
+			+ "}\n"
+	];
+
 	public function write(out:String):Array<String> {
 		var printer = new haxe.macro.Printer("\t");
 		var modules = [];
@@ -2103,6 +2134,16 @@ class Gen {
 			var mod = new Module(typePack(n, structsUsed.get(n).origin));
 			emit(structDef(structsUsed.get(n), mod), mod);
 			names.set(n, true);
+		}
+		// the parameters' conversions (argType)
+		if (classes.exists("NSString") && packOf(classes.get("NSString").origin) == "foundation") {
+			var dir = out + "/foundation";
+			sys.FileSystem.createDirectory(dir);
+			for (k => src in ARG_ABSTRACTS) {
+				sys.io.File.saveContent(dir + "/" + k + ".hx", "// Generated by hxmc-objc-extern-gen.\npackage foundation;\n\n" + src);
+				modules.push("foundation." + k);
+				names.set(k, true);
+			}
 		}
 		for (c in constantsDefs(n -> names.exists(n))) {
 			emit(c.def, c.mod);
